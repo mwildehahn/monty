@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::fmt;
+use crate::run::RunResult;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Object {
@@ -137,20 +138,20 @@ impl Object {
         }
     }
 
-    pub fn bool(&self) -> Option<bool> {
+    pub fn bool(&self) -> RunResult<bool> {
         match self {
-            Self::Undefined => None,
-            Self::Ellipsis => Some(true),
-            Self::None => Some(false),
-            Self::True => Some(true),
-            Self::False => Some(false),
-            Self::Int(v) => Some(*v != 0),
-            Self::Float(f) => Some(*f != 0.0),
-            Self::Str(v) => Some(!v.is_empty()),
-            Self::Bytes(v) => Some(!v.is_empty()),
-            Self::List(v) => Some(!v.is_empty()),
-            Self::Tuple(v) => Some(!v.is_empty()),
-            Self::Range(v) => Some(*v != 0),
+            Self::Undefined => Err(format!("Cannot convert {} to bool", self).into()),
+            Self::Ellipsis => Ok(true),
+            Self::None => Ok(false),
+            Self::True => Ok(true),
+            Self::False => Ok(false),
+            Self::Int(v) => Ok(*v != 0),
+            Self::Float(f) => Ok(*f != 0.0),
+            Self::Str(v) => Ok(!v.is_empty()),
+            Self::Bytes(v) => Ok(!v.is_empty()),
+            Self::List(v) => Ok(!v.is_empty()),
+            Self::Tuple(v) => Ok(!v.is_empty()),
+            Self::Range(v) => Ok(*v != 0),
         }
     }
 

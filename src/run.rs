@@ -50,13 +50,12 @@ impl Frame {
     }
 
     fn execute_expr<'a>(&'a self, expr: &'a RunExpr) -> RunResult<Cow<Object>> {
-        let evaluate = Evaluator::new(&self.namespace);
-        evaluate.evaluate(expr)
+        // TODO, does creating this struct harm performance, or is it optimised out?
+        Evaluator::new(&self.namespace).evaluate(expr)
     }
 
     fn execute_expr_bool(&self, expr: &RunExpr) -> RunResult<bool> {
-        let evaluate = Evaluator::new(&self.namespace);
-        evaluate.evaluate_bool(expr)
+        Evaluator::new(&self.namespace).evaluate_bool(expr)
     }
 
     fn assign(&mut self, target: usize, object: &RunExpr) -> RunResult<()> {

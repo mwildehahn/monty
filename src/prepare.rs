@@ -1,7 +1,8 @@
-use ahash::AHashMap;
 use std::borrow::Cow;
-use crate::evaluate::Evaluator;
+use std::collections::hash_map::Entry;
+use ahash::AHashMap;
 
+use crate::evaluate::Evaluator;
 use crate::types::{Builtins, Expr, Node};
 use crate::object::Object;
 
@@ -21,6 +22,7 @@ pub(crate) fn prepare(nodes: Vec<Node<String, String>>, input_names: &[&str]) ->
 struct Prepare {
     name_map: AHashMap<String, usize>,
     namespace: Vec<Object>,
+    consts: Vec<bool>,
 }
 
 impl Prepare {
@@ -30,7 +32,8 @@ impl Prepare {
             name_map.insert(name.to_string(), index);
         }
         let namespace = vec![Object::Undefined; name_map.len()];
-        Self { name_map, namespace }
+        let consts = vec![false; name_map.len()];
+        Self { name_map, namespace, consts }
     }
 
     fn prepare_nodes(&mut self, nodes: Vec<Node<String, String>>) -> PrepareResult<Vec<RunNode>> {
@@ -44,15 +47,18 @@ impl Prepare {
                 }
                 Node::Assign { target, object } => {
                     let expr = self.prepare_expression(*object)?;
-                    let target = self.get_id(target);
-                    // if expr.is_const() {
-                    //     self.namespace[target] = expr.into_const();
-                    // } else {
-                    // }
-                    new_nodes.push(Node::Assign { target, object: Box::new(expr) });
+                    let (target, is_new) = self.get_id(target);
+                    if is_new && expr.is_const() {
+                        self.namespace[target] = expr.into_object();
+                        self.consts[target] = true;
+                    } else {
+                        new_nodes.push(Node::Assign { target, object: Box::new(expr) });
+                        self.consts[target] = false;
+                    }
                 }
                 Node::OpAssign { target, op, object } => {
-                    let target = self.get_id(target);
+                    let target = self.get_id(target).0;
+                    self.consts[target] = false;
                     let object = Box::new(self.prepare_expression(*object)?);
                     new_nodes.push(Node::OpAssign { target, op, object });
                 }
@@ -67,11 +73,24 @@ impl Prepare {
                     body: self.prepare_nodes(body)?,
                     or_else: self.prepare_nodes(or_else)?,
                 }),
-                Node::If { test, body, or_else } => new_nodes.push(Node::If {
-                    test: self.prepare_expression(test)?,
-                    body: self.prepare_nodes(body)?,
-                    or_else: self.prepare_nodes(or_else)?,
-                }),
+                Node::If { test, body, or_else } => {
+                    let test= self.prepare_expression(test)?;
+                    let body = self.prepare_nodes(body)?;
+                    let or_else = self.prepare_nodes(or_else)?;
+                    if test.is_const() {
+                        if test.into_object().bool()? {
+                            new_nodes.extend(body);
+                        } else {
+                            new_nodes.extend(or_else);
+                        }
+                    } else {
+                        new_nodes.push(Node::If {
+                            test,
+                            body,
+                            or_else,
+                        })
+                    }
+                },
             }
         }
         Ok(new_nodes)
@@ -80,7 +99,7 @@ impl Prepare {
     fn prepare_expression(&mut self, expr: Expr<String, String>) -> PrepareResult<RunExpr> {
         let expr = match expr {
             Expr::Constant(object) => Expr::Constant(object),
-            Expr::Name(name) => Expr::Name(self.get_id(name)),
+            Expr::Name(name) => Expr::Name(self.get_id(name).0),
             Expr::Op { left, op, right } => Expr::Op {
                 left: Box::new(self.prepare_expression(*left)?),
                 op,
@@ -114,9 +133,8 @@ impl Prepare {
             }
         };
 
-        let evaluate = Evaluator::new(&self.namespace);
-
-        if evaluate.can_be_const(&expr) {
+        if can_be_const(&expr, &self.consts) {
+            let evaluate = Evaluator::new(&self.namespace);
             let object = evaluate.evaluate(&expr)?;
             Ok(Expr::Constant(object.into_owned()))
         } else {
@@ -124,11 +142,40 @@ impl Prepare {
         }
     }
 
-    fn get_id(&mut self, name: String) -> usize {
-        *self.name_map.entry(name).or_insert_with(|| {
-            let id = self.namespace.len();
-            self.namespace.push(Object::Undefined);
-            id
-        })
+    /// either return the id for a name, or insert that name and get its ID
+    /// returns (id, whether the id is newly added)
+    fn get_id(&mut self, name: String) -> (usize, bool) {
+        match self.name_map.entry(name) {
+            Entry::Occupied(e) => {
+                let id = e.get();
+                (*id, false)
+            },
+            Entry::Vacant(e) => {
+                let id = self.namespace.len();
+                self.namespace.push(Object::Undefined);
+                self.consts.push(false);
+                e.insert(id);
+                (id, true)
+            }
+        }
+    }
+}
+
+/// whether an expression can be evaluated to a constant
+fn can_be_const(expr: &RunExpr, consts: &[bool]) -> bool {
+    match expr {
+        Expr::Constant(_) => true,
+        Expr::Name(id) => *consts.get(*id).unwrap_or(&false),
+        Expr::Call { func, args, kwargs } => {
+            !func.side_effects() && args.iter().all(|arg| can_be_const(arg, consts))
+                && kwargs.iter().all(|(_, arg)| can_be_const(arg, consts))
+        }
+        Expr::Op { left, op: _, right } => {
+            can_be_const(left, consts) && can_be_const(right, consts)
+        }
+        Expr::CmpOp { left, op: _, right } => {
+            can_be_const(left, consts) && can_be_const(right, consts)
+        }
+        Expr::List(elements) => elements.iter().all(|el| can_be_const(el, consts)),
     }
 }

@@ -29,14 +29,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let tic = Instant::now();
-
     // let input_names = vec!["foo", "bar"];
     // let inputs = vec![Object::Int(1), Object::Int(2)];
     let input_names = vec![];
     let inputs = vec![];
 
     let ex = Executor::new(&code, file_path, &input_names).unwrap();
+
+    let tic = Instant::now();
     match ex.run(inputs) {
         Ok(_) => {
             let toc = Instant::now();
@@ -76,6 +76,7 @@ struct Executor {
 impl Executor {
     fn new(code: &str, filename: &str, input_names: &[&str]) -> ParseResult<Self> {
         let nodes = parse(code, filename)?;
+        // dbg!(&nodes);
         let (initial_namespace, nodes) = prepare(nodes, input_names)?;
         dbg!(&initial_namespace, &nodes);
         Ok(Self {

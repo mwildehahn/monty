@@ -13,30 +13,6 @@ impl<'a> Evaluator<'a> {
         Self {namespace}
     }
 
-    pub fn can_be_const(&self, expr: &RunExpr) -> bool {
-        match expr {
-            Expr::Constant(_) => true,
-            Expr::Name(id) => {
-                if let Some(object) = self.namespace.get(*id) {
-                    !matches!(object, Object::Undefined)
-                } else {
-                    false
-                }
-            },
-            Expr::Call { func, args, kwargs } => {
-                !func.side_effects() && args.iter().all(|arg| self.can_be_const(arg))
-                    && kwargs.iter().all(|(_, arg)| self.can_be_const(arg))
-            }
-            Expr::Op { left, op: _, right } => {
-                self.can_be_const(left) && self.can_be_const(right)
-            }
-            Expr::CmpOp { left, op: _, right } => {
-                self.can_be_const(left) && self.can_be_const(right)
-            }
-            Expr::List(elements) => elements.iter().all(|el| self.can_be_const(el)),
-        }
-    }
-
     pub fn evaluate(&self, expr: &'a RunExpr) -> RunResult<Cow<'a, Object>> {
         match expr {
             Expr::Constant(object) => Ok(Cow::Borrowed(object)),
@@ -66,10 +42,7 @@ impl<'a> Evaluator<'a> {
     pub fn evaluate_bool(&self, expr: &RunExpr) -> RunResult<bool> {
         match expr {
             Expr::CmpOp { left, op, right } => self.cmp_op(left, op, right),
-            _ => {
-                let object = self.evaluate(expr)?;
-                object.as_ref().bool().ok_or_else(|| Cow::Owned(format!("Cannot convert {} to bool", object.as_ref())))
-            }
+            _ => self.evaluate(expr)?.as_ref().bool(),
         }
     }
 

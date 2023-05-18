@@ -64,7 +64,7 @@ impl<T, Funcs> Expr<T, Funcs> {
         matches!(self, Self::Constant(_))
     }
 
-    pub fn into_const(self) -> Object {
+    pub fn into_object(self) -> Object {
         match self {
             Self::Constant(object) => object,
             _ => panic!("into_const can only be called on Constant expression.")
