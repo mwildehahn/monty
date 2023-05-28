@@ -53,7 +53,7 @@ impl Parser {
                 decorator_list: _,
                 returns: _,
                 type_comment: _,
-            } => todo!("FunctionDef"),
+            } => Err("TODO FunctionDef".into()),
             StmtKind::AsyncFunctionDef {
                 name: _,
                 args: _,
@@ -61,16 +61,16 @@ impl Parser {
                 decorator_list: _,
                 returns: _,
                 type_comment: _,
-            } => todo!("AsyncFunctionDef"),
+            } => Err("TODO AsyncFunctionDef".into()),
             StmtKind::ClassDef {
                 name: _,
                 bases: _,
                 keywords: _,
                 body: _,
                 decorator_list: _,
-            } => todo!("ClassDef"),
-            StmtKind::Return { value: _ } => todo!("Return"),
-            StmtKind::Delete { targets: _ } => todo!("Delete"),
+            } => Err("TODO ClassDef".into()),
+            StmtKind::Return { value: _ } => Err("TODO Return".into()),
+            StmtKind::Delete { targets: _ } => Err("TODO Delete".into()),
             StmtKind::Assign { targets, value, .. } => self.parse_assignment(first(targets)?, *value),
             StmtKind::AugAssign { target, op, value } => Ok(Node::OpAssign {
                 target: self.parse_identifier(*target)?,
@@ -105,12 +105,12 @@ impl Parser {
                 body: _,
                 orelse: _,
                 type_comment: _,
-            } => todo!("AsyncFor"),
+            } => Err("TODO AsyncFor".into()),
             StmtKind::While {
                 test: _,
                 body: _,
                 orelse: _,
-            } => todo!("While"),
+            } => Err("TODO While".into()),
             StmtKind::If { test, body, orelse } => {
                 let test = self.parse_expression(*test)?;
                 let body = self.parse_statements(body)?;
@@ -121,39 +121,39 @@ impl Parser {
                 items: _,
                 body: _,
                 type_comment: _,
-            } => todo!("With"),
+            } => Err("TODO With".into()),
             StmtKind::AsyncWith {
                 items: _,
                 body: _,
                 type_comment: _,
-            } => todo!("AsyncWith"),
-            StmtKind::Match { subject: _, cases: _ } => todo!("Match"),
-            StmtKind::Raise { exc: _, cause: _ } => todo!("Raise"),
+            } => Err("TODO AsyncWith".into()),
+            StmtKind::Match { subject: _, cases: _ } => Err("TODO Match".into()),
+            StmtKind::Raise { exc: _, cause: _ } => Err("TODO Raise".into()),
             StmtKind::Try {
                 body: _,
                 handlers: _,
                 orelse: _,
                 finalbody: _,
-            } => todo!("Try"),
+            } => Err("TODO Try".into()),
             StmtKind::TryStar {
                 body: _,
                 handlers: _,
                 orelse: _,
                 finalbody: _,
-            } => todo!("TryStar"),
-            StmtKind::Assert { test: _, msg: _ } => todo!("Assert"),
-            StmtKind::Import { names: _ } => todo!("Import"),
+            } => Err("TODO TryStar".into()),
+            StmtKind::Assert { test: _, msg: _ } => Err("TODO Assert".into()),
+            StmtKind::Import { names: _ } => Err("TODO Import".into()),
             StmtKind::ImportFrom {
                 module: _,
                 names: _,
                 level: _,
-            } => todo!("ImportFrom"),
-            StmtKind::Global { names: _ } => todo!("Global"),
-            StmtKind::Nonlocal { names: _ } => todo!("Nonlocal"),
+            } => Err("TODO ImportFrom".into()),
+            StmtKind::Global { names: _ } => Err("TODO Global".into()),
+            StmtKind::Nonlocal { names: _ } => Err("TODO Nonlocal".into()),
             StmtKind::Expr { value } => Ok(Node::Expr(self.parse_expression(*value)?)),
             StmtKind::Pass => Ok(Node::Pass),
-            StmtKind::Break => todo!("Break"),
-            StmtKind::Continue => todo!("Continue"),
+            StmtKind::Break => Err("TODO Break".into()),
+            StmtKind::Continue => Err("TODO Continue".into()),
         }
     }
 
@@ -184,7 +184,7 @@ impl Parser {
                     },
                 })
             }
-            ExprKind::NamedExpr { target: _, value: _ } => todo!("NamedExpr"),
+            ExprKind::NamedExpr { target: _, value: _ } => Err("TODO NamedExpr".into()),
             ExprKind::BinOp { left, op, right } => {
                 let left = Box::new(self.parse_expression(*left)?);
                 let right = Box::new(self.parse_expression(*right)?);
@@ -197,26 +197,26 @@ impl Parser {
                     },
                 })
             }
-            ExprKind::UnaryOp { op: _, operand: _ } => todo!("UnaryOp"),
-            ExprKind::Lambda { args: _, body: _ } => todo!("Lambda"),
+            ExprKind::UnaryOp { op: _, operand: _ } => Err("TODO UnaryOp".into()),
+            ExprKind::Lambda { args: _, body: _ } => Err("TODO Lambda".into()),
             ExprKind::IfExp {
                 test: _,
                 body: _,
                 orelse: _,
-            } => todo!("IfExp"),
-            ExprKind::Dict { keys: _, values: _ } => todo!("Dict"),
-            ExprKind::Set { elts: _ } => todo!("Set"),
-            ExprKind::ListComp { elt: _, generators: _ } => todo!("ListComp"),
-            ExprKind::SetComp { elt: _, generators: _ } => todo!("SetComp"),
+            } => Err("TODO IfExp".into()),
+            ExprKind::Dict { keys: _, values: _ } => Err("TODO Dict".into()),
+            ExprKind::Set { elts: _ } => Err("TODO Set".into()),
+            ExprKind::ListComp { elt: _, generators: _ } => Err("TODO ListComp".into()),
+            ExprKind::SetComp { elt: _, generators: _ } => Err("TODO SetComp".into()),
             ExprKind::DictComp {
                 key: _,
                 value: _,
                 generators: _,
-            } => todo!("DictComp"),
-            ExprKind::GeneratorExp { elt: _, generators: _ } => todo!("GeneratorExp"),
-            ExprKind::Await { value: _ } => todo!("Await"),
-            ExprKind::Yield { value: _ } => todo!("Yield"),
-            ExprKind::YieldFrom { value: _ } => todo!("YieldFrom"),
+            } => Err("TODO DictComp".into()),
+            ExprKind::GeneratorExp { elt: _, generators: _ } => Err("TODO GeneratorExp".into()),
+            ExprKind::Await { value: _ } => Err("TODO Await".into()),
+            ExprKind::Yield { value: _ } => Err("TODO Yield".into()),
+            ExprKind::YieldFrom { value: _ } => Err("TODO YieldFrom".into()),
             ExprKind::Compare { left, ops, comparators } => Ok(ExprLoc::new(
                 self.convert_range(&range),
                 Expr::CmpOp {
@@ -241,28 +241,28 @@ impl Parser {
                 value: _,
                 conversion: _,
                 format_spec: _,
-            } => todo!("FormattedValue"),
-            ExprKind::JoinedStr { values: _ } => todo!("JoinedStr"),
+            } => Err("TODO FormattedValue".into()),
+            ExprKind::JoinedStr { values: _ } => Err("TODO JoinedStr".into()),
             ExprKind::Constant { value, .. } => Ok(ExprLoc::new(self.convert_range(&range), Expr::Constant(convert_const(value)?))),
             ExprKind::Attribute {
                 value: _,
                 attr: _,
                 ctx: _,
-            } => todo!("Attribute"),
+            } => Err("TODO Attribute".into()),
             ExprKind::Subscript {
                 value: _,
                 slice: _,
                 ctx: _,
-            } => todo!("Subscript"),
-            ExprKind::Starred { value: _, ctx: _ } => todo!("Starred"),
+            } => Err("TODO Subscript".into()),
+            ExprKind::Starred { value: _, ctx: _ } => Err("TODO Starred".into()),
             ExprKind::Name { id, .. } => Ok(ExprLoc::new(self.convert_range(&range), Expr::Name(Identifier::from_name(id)))),
-            ExprKind::List { elts: _, ctx: _ } => todo!("List"),
-            ExprKind::Tuple { elts: _, ctx: _ } => todo!("Tuple"),
+            ExprKind::List { elts: _, ctx: _ } => Err("TODO List".into()),
+            ExprKind::Tuple { elts: _, ctx: _ } => Err("TODO Tuple".into()),
             ExprKind::Slice {
                 lower: _,
                 upper: _,
                 step: _,
-            } => todo!("Slice"),
+            } => Err("TODO Slice".into()),
         }
     }
 
