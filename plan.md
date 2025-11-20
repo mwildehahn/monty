@@ -48,7 +48,7 @@ With `Arc<Object>` or `Rc<Object>`, you cannot distinguish between "same object"
 
 ### Design Simplification: No Free List
 
-**Key Decision**: IDs are **never reused** - always append to vector.
+**Key Decision**: IDs are **never reused during a single execution** - always append to vector. After a run finishes we call `Heap::clear()` which resets the arena wholesale, so stale IDs can never leak across runs.
 
 **Alternative Considered**: Free list to recycle IDs (more memory efficient but complex)
 
@@ -76,13 +76,13 @@ With `Arc<Object>` or `Rc<Object>`, you cannot distinguish between "same object"
 
 **Trade-offs Accepted**:
 
-- ❌ Vector keeps growing (but freed slots are just `None` = 1 byte)
+- ❌ Vector keeps growing (freed slots still hold an `Option<HeapObject>` shell)
 - ❌ Can't reclaim vector capacity without compacting
 - ❌ Iteration must skip `None` entries
 
 **For Monty's Use Case**: These trade-offs are acceptable because:
-- Executions are short-lived (heap cleared between runs)
-- Memory overhead is minimal (`None` vs full object)
+- Executions are short-lived (heap cleared between runs via `Heap::clear()`)
+- The extra `Option` wrapper is predictable overhead and compaction is on the roadmap
 - Simplicity enables faster development and fewer bugs
 
 ## Design Overview
@@ -91,7 +91,10 @@ With `Arc<Object>` or `Rc<Object>`, you cannot distinguish between "same object"
 
 ```rust
 /// Primary value type - fits in 16 bytes (2 words)
-#[derive(Clone, Debug, PartialEq)]
+/// NOTE: We intentionally do not derive `Clone`/`PartialEq` so that every
+/// duplication routes through helper methods that can touch the heap and bump
+/// reference counts.
+#[derive(Debug)]
 pub enum Object {
     // Immediate values (stored inline, no heap allocation)
     Int(i64),
@@ -104,6 +107,46 @@ pub enum Object {
 
 /// Index into heap arena
 pub type ObjectId = usize;
+
+/// Borrowed handle that ensures refcount operations fire on clone/drop.
+/// Without this guard a plain `Object::Ref` clone would just copy the ID and
+/// silently skip `inc_ref`, which inevitably leaks or double-frees.
+pub struct HeapRef<'a> {
+    heap: &'a mut Heap,
+}
+
+impl<'a> HeapRef<'a> {
+    pub fn clone_object(&mut self, object: &Object) -> Object {
+        match object {
+            Object::Ref(id) => {
+                self.heap.inc_ref(*id);
+                Object::Ref(*id)
+            }
+            other => other.clone_immediate(),
+        }
+    }
+
+    pub fn drop_object(&mut self, object: &Object) {
+        if let Object::Ref(id) = object {
+            self.heap.dec_ref(*id);
+        }
+    }
+}
+
+impl Object {
+    /// Helper used by `HeapRef` so immediate values can still be duplicated
+    /// cheaply while keeping heap-backed refs centralized.
+    fn clone_immediate(&self) -> Object {
+        match self {
+            Object::Int(v) => Object::Int(*v),
+            Object::Bool(v) => Object::Bool(*v),
+            Object::None => Object::None,
+            Object::Ref(_) => unreachable!(
+                "Ref clones must go through HeapRef to maintain refcounts"
+            ),
+        }
+    }
+}
 ```
 
 ### Heap Structure
@@ -112,7 +155,7 @@ pub type ObjectId = usize;
 /// Central heap managing all allocated objects
 pub struct Heap {
     /// All heap-allocated objects. None = freed slot.
-    /// IDs are never reused - always append new objects.
+    /// IDs are never reused during a run - always append new objects until `clear()`.
     objects: Vec<Option<HeapObject>>,
 
     /// Next ID to allocate (monotonically increasing)
@@ -123,6 +166,10 @@ pub struct Heap {
 struct HeapObject {
     /// Reference count for memory management
     refcount: usize,
+
+    /// Optional cached hash for immutable objects (str, tuple, bytes, etc.).
+    /// Needed because hashing `Object::Ref` requires heap context.
+    cached_hash: Option<u64>,
 
     /// Actual object data
     data: HeapData,
@@ -135,11 +182,29 @@ pub enum HeapData {
     Bytes(Vec<u8>),
     List(Vec<Object>),
     Tuple(Vec<Object>),
+    Set(HashSet<Object>),       // Only hashable objects allowed (Python rule)
+    FrozenSet(HashSet<Object>), // Immutable set, cached hash populated
     Dict(HashMap<Object, Object>),
     Exception(Exception),
     // Future: Function, Class, Instance, etc.
 }
 ```
+
+**Why cache hashes?**
+
+- The Python dictionary model allows strings, tuples, and other immutable types as keys.
+- Adding `FrozenSet` to `HeapData` makes it hashable (like CPython) while `Set` stays mutable/unhashable.
+- Rust's `Hash` trait does not accept extra context, so hashing `Object::Ref(id)` cannot look inside the heap unless we pre-compute a hash when the object is created.
+- `cached_hash` stores that value for immutable heap entries. Mutable types (lists, dicts) leave it as `None` so any attempt to hash them raises `TypeError`, matching CPython.
+
+### Dictionary Hashing Strategy
+
+1. **Allocation time**: When creating immutable heap data (str, bytes, tuple/frozenset of hashable elements), compute its hash once and store it in `cached_hash`. Reuse CPython's rules: tuples/frozensets are hashable only if every element is hashable.
+2. **Hash implementation**: `impl Hash for Object` matches on immediates; for `Object::Ref(id)` it fetches the heap slot and feeds the cached hash to the hasher. If `cached_hash` is `None`, raise `TypeError` from the caller instead of trying to hash a mutable object.
+3. **Dictionary storage**: Dictionaries continue to use `HashMap<Object, Object>`, but only `Object`s known to be hashable (checked via `heap.is_hashable(&key)`) reach `HashMap::insert`; otherwise `TypeError` is raised.
+4. **Invalidating hashes**: Because only immutable data can have a cached hash, we never need to recompute or invalidate—it stays correct for the lifetime of the heap entry.
+
+`util::hash_frozenset` sorts the element hashes before folding them so the final value is order-independent, matching CPython's behavior.
 
 ## Implementation Plan
 
@@ -175,12 +240,48 @@ impl Heap {
     /// IDs are never reused - always append
     pub fn allocate(&mut self, data: HeapData) -> ObjectId {
         let id = self.next_id;
+        let cached_hash = self.compute_hash(&data);
         self.objects.push(Some(HeapObject {
             refcount: 1,
+            cached_hash,
             data,
         }));
         self.next_id += 1;
         id
+    }
+
+    fn compute_hash(&self, data: &HeapData) -> Option<u64> {
+        match data {
+            HeapData::Str(s) => Some(util::hash_str(s)),
+            HeapData::Bytes(b) => Some(util::hash_bytes(b)),
+            HeapData::Tuple(items) => {
+                if items.iter().all(|o| self.is_hashable(o)) {
+                    Some(util::hash_tuple(items))
+                } else {
+                    None
+                }
+            }
+            HeapData::FrozenSet(items) => {
+                if items.iter().all(|o| self.is_hashable(o)) {
+                    Some(util::hash_frozenset(items))
+                } else {
+                    None
+                }
+            }
+            _ => None, // Lists/dicts/exceptions are unhashable
+        }
+    }
+
+    fn is_hashable(&self, object: &Object) -> bool {
+        match object {
+            Object::Int(_) | Object::Bool(_) | Object::None => true,
+            Object::Ref(id) => self
+                .objects
+                .get(*id)
+                .and_then(|slot| slot.as_ref())
+                .map(|obj| obj.cached_hash.is_some())
+                .unwrap_or(false),
+        }
     }
 
     /// Increment reference count
@@ -190,12 +291,26 @@ impl Heap {
         }
     }
 
-    /// Decrement reference count, free if zero
+    /// Decrement reference count, free if zero (iteratively to avoid stack overflow)
     pub fn dec_ref(&mut self, id: ObjectId) {
-        if let Some(Some(obj)) = self.objects.get_mut(id) {
-            obj.refcount -= 1;
-            if obj.refcount == 0 {
-                self.free_object(id);
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            let Some(slot) = self.objects.get_mut(current) else { continue };
+            let Some(obj) = slot.as_mut() else { continue };
+
+            if obj.refcount > 1 {
+                obj.refcount -= 1;
+                continue;
+            }
+
+            // Take ownership of the data so we can walk children without new allocations
+            let taken = slot.take().map(|mut owned| {
+                owned.refcount = 0;
+                owned.data
+            });
+
+            if let Some(data) = taken {
+                self.enqueue_children(&data, &mut stack);
             }
         }
     }
@@ -219,48 +334,47 @@ impl Heap {
     }
 
     fn free_object(&mut self, id: ObjectId) {
-        // Recursively dec_ref any contained Objects
-        self.dec_ref_contents(id);
-
-        // Set slot to None, freeing the HeapObject
-        self.objects[id] = None;
+        self.dec_ref(id);
     }
 
-    fn dec_ref_contents(&mut self, id: ObjectId) {
-        // Need to collect IDs first to avoid borrowing issues
-        let child_ids: Vec<ObjectId> = if let Some(Some(obj)) = &self.objects.get(id) {
-            match &obj.data {
-                HeapData::List(items) | HeapData::Tuple(items) => {
-                    items.iter()
-                        .filter_map(|obj| match obj {
-                            Object::Ref(id) => Some(*id),
-                            _ => None,
-                        })
-                        .collect()
+    fn enqueue_children(&mut self, data: &HeapData, stack: &mut Vec<ObjectId>) {
+        match data {
+            HeapData::List(items) | HeapData::Tuple(items) => {
+                for obj in items {
+                    if let Object::Ref(id) = obj {
+                        stack.push(*id);
+                    }
                 }
-                HeapData::Dict(map) => {
-                    map.iter()
-                        .flat_map(|(k, v)| {
-                            let mut ids = Vec::new();
-                            if let Object::Ref(id) = k { ids.push(*id); }
-                            if let Object::Ref(id) = v { ids.push(*id); }
-                            ids
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
             }
-        } else {
-            Vec::new()
-        };
-
-        // Now dec_ref all children
-        for child_id in child_ids {
-            self.dec_ref(child_id);
+            HeapData::Dict(map) => {
+                for (k, v) in map {
+                    if let Object::Ref(id) = k {
+                        stack.push(*id);
+                    }
+                    if let Object::Ref(id) = v {
+                        stack.push(*id);
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+
+    /// Frees all objects and resets arena between executions.
+    /// Safe because callers only invoke it once no references escape a run.
+    pub fn clear(&mut self) {
+        for id in 0..self.objects.len() {
+            if self.objects[id].is_some() {
+                self.free_object(id);
+            }
+        }
+        self.objects.clear();
+        self.next_id = 0;
     }
 }
 ```
+
+This iterative `dec_ref` implementation protects us from stack overflows caused by deeply nested data (it uses an explicit stack) and avoids the temporary `Vec<ObjectId>` allocation by `take`-ing ownership of each heap slot before visiting its children.
 
 2. **Update `src/object.rs`**:
 ```rust
@@ -318,13 +432,14 @@ impl Object {
 pub struct Executor<'c> {
     initial_namespace: Vec<Object>,
     nodes: Vec<Node<'c>>,
-    heap: Heap,  // Add heap
+    heap: Heap,  // Shared heap reused per run
 }
 
 impl<'c> Executor<'c> {
-    pub fn run(&self, inputs: Vec<Object>) -> RunResult<'c, Exit<'c>> {
-        let mut heap = self.heap.clone();  // Start with prepared heap
-        // Pass &mut heap through execution
+    pub fn run(&mut self, inputs: Vec<Object>) -> RunResult<'c, Exit<'c>> {
+        self.heap.clear(); // Drop any refs from a previous invocation
+        let heap = &mut self.heap;
+        // Pass `heap` as a &mut reference through execution
         // ...
     }
 }
@@ -348,14 +463,14 @@ impl<'c> Executor<'c> {
 // evaluate.rs
 pub fn evaluate<'c, 'd>(
     namespace: &'d mut [Object],
-    heap: &'d mut Heap,  // Add heap
+    heap: &'d mut Heap,  // Borrowed heap shared across all frames
     expr_loc: &'d ExprLoc<'c>,
 ) -> RunResult<'c, Cow<'d, Object>>
 
 // run.rs
 pub struct RunFrame<'c> {
     namespace: Vec<Object>,
-    heap: Heap,  // Add heap to frame
+    heap: &'c mut Heap,  // Frames borrow the single heap
     parent: Option<Box<StackFrame<'c>>>,
     name: Cow<'c, str>,
 }
@@ -750,7 +865,9 @@ This design solves reference semantics but does NOT solve:
 2. **Nested scopes**: Need scope chain (separate from heap)
 3. **Global/nonlocal**: Need multi-level namespace lookup
 4. **Circular references**: Leak memory without cycle detector
+   - This is not optional for real Python workloads; schedule at least a mark/sweep pass before enabling user-defined classes or closures.
 5. **Lifetime 'c**: Still need owned AST for `eval()`
+6. **Scope chains**: LEGB resolution remains flat today, so heap IDs must eventually pair with stacked namespaces and captured environments.
 
 These require additional architectural changes beyond the heap design.
 
@@ -758,7 +875,7 @@ These require additional architectural changes beyond the heap design.
 
 ### 1. Cycle Detection
 
-Add mark-and-sweep GC for unreachable cycles:
+Add mark-and-sweep GC for unreachable cycles. This must land immediately after Phase 3 so closures, classes, and default arguments do not leak per execution:
 
 ```rust
 impl Heap {
@@ -806,7 +923,7 @@ The arena hybrid design provides:
 ✅ **Extensible** foundation for GC, closures, classes
 ✅ **Debuggable** can inspect entire heap state
 
-The simplified approach (no free list, monotonic IDs) trades some memory efficiency for significant implementation simplicity and safety. For Monty's use case (sandboxed execution), this is an excellent trade-off.
+The simplified approach (no free list, monotonic IDs per run) trades some memory efficiency for significant implementation simplicity and safety. For Monty's use case (sandboxed execution), this is an excellent trade-off, provided we land the accompanying cycle detection and scope-chain work immediately after the core heap rollout.
 
 ## Next Steps
 
