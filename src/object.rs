@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
-use std::ptr::addr_of;
 
 use crate::exceptions::{exc_err_fmt, ExcType, SimpleException};
 use crate::heap::HeapData;
@@ -299,7 +298,7 @@ impl Object {
     ///
     /// For inline values (Int, Float, Range), this method allocates them to the heap on first call
     /// and replaces `self` with an `Object::Ref` pointing to the boxed value. This ensures that
-    /// subsequent calls to `id()` or `id_or_box()` return the same stable heap address.
+    /// subsequent calls to `id()` return the same stable heap address.
     ///
     /// Singletons (None, True, False, etc.) return constant IDs without heap allocation.
     /// Already heap-allocated objects (Ref) return their existing ObjectId.
@@ -307,26 +306,22 @@ impl Object {
         match self {
             // should not be used in practice
             Self::Undefined => 0,
-            // Singletons derive their IDs by setting low bits of the heap's address
-            // This ensures uniqueness (can't collide with aligned heap allocations)
-            // while keeping addresses clearly related to the heap
-            Self::Ellipsis => heap.singleton_addr(0x1),
-            Self::None => heap.singleton_addr(0x2),
-            Self::True => heap.singleton_addr(0x3),
-            Self::False => heap.singleton_addr(0x4),
-            // Exceptions use their memory address (already stable)
-            Self::Exc(v) => addr_of!(v) as usize,
-            // Already heap-allocated, return the memory address of the HeapData
-            Self::Ref(id) => heap.get_addr(*id),
-            // Everything else (Int, Float, Range) needs to be boxed
+            // Singletons have constant IDs
+            Self::Ellipsis => 1,
+            Self::None => 2,
+            Self::True => 3,
+            Self::False => 4,
+            // Already heap-allocated, return id plus 5
+            Self::Ref(id) => *id + 5,
+            // Everything else (Int, Float, Range, Exc) needs to be boxed
             _ => {
                 // Clone the current value before replacing it
                 let boxed = Box::new(self.clone());
                 let new_id = heap.allocate(HeapData::Object(boxed));
                 // Replace self with a Ref to the newly allocated heap object
                 *self = Self::Ref(new_id);
-                // Return the memory address of the heap data
-                heap.get_addr(new_id)
+                // again return id plus 5
+                new_id
             }
         }
     }

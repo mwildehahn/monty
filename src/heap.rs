@@ -127,40 +127,6 @@ impl Heap {
             .data
     }
 
-    /// Returns the memory address of the heap data stored at the given ID.
-    ///
-    /// This provides a stable identifier for the heap object that matches Python's id() semantics.
-    /// Note: The address is only stable as long as the heap's Vec doesn't reallocate.
-    ///
-    /// # Panics
-    /// Panics if the object ID is invalid or the object has already been freed.
-    #[must_use]
-    pub fn get_addr(&self, id: ObjectId) -> usize {
-        let heap_data = self.get(id);
-        std::ptr::addr_of!(*heap_data) as usize
-    }
-
-    /// Returns a derived memory address for singleton objects based on the heap's address.
-    ///
-    /// This creates stable, unique IDs for singletons (Ellipsis, None, True, False) by using
-    /// the Heap struct's memory address with low bits set. Since heap allocations are typically
-    /// 8-byte aligned (on 64-bit systems), real heap object addresses have their low 3 bits clear.
-    /// By setting these low bits, we create addresses that:
-    /// - Are clearly derived from the heap's address
-    /// - Cannot possibly collide with actual aligned heap allocations
-    /// - Look like real memory addresses
-    ///
-    /// Low bit patterns used:
-    /// - Ellipsis: heap_addr | 0x1 (sets bit 0)
-    /// - None: heap_addr | 0x2 (sets bit 1)
-    /// - True: heap_addr | 0x3 (sets bits 0 and 1)
-    /// - False: heap_addr | 0x4 (sets bit 2)
-    #[must_use]
-    pub fn singleton_addr(&self, low_bits: usize) -> usize {
-        let heap_addr = std::ptr::addr_of!(*self) as usize;
-        heap_addr | low_bits
-    }
-
     /// Returns a mutable reference to the heap data stored at the given ID.
     ///
     /// # Panics
@@ -185,12 +151,6 @@ impl Heap {
 /// `dec_ref` can recursively drop entire object graphs without recursion.
 fn enqueue_children(data: &HeapData, stack: &mut Vec<ObjectId>) {
     match data {
-        HeapData::Object(obj) => {
-            // Boxed objects may contain heap references
-            if let Object::Ref(id) = obj.as_ref() {
-                stack.push(*id);
-            }
-        }
         HeapData::List(items) | HeapData::Tuple(items) => {
             // Walk through all items and enqueue any heap-allocated objects
             for obj in items {
@@ -198,6 +158,9 @@ fn enqueue_children(data: &HeapData, stack: &mut Vec<ObjectId>) {
                     stack.push(*id);
                 }
             }
+        }
+        HeapData::Object(_) => {
+            // heap objects must be simple constants and shouldn't ever contain nested objects
         }
         HeapData::Str(_) | HeapData::Bytes(_) => {
             // Strings and bytes don't contain nested objects
