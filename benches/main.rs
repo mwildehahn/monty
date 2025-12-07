@@ -234,6 +234,74 @@ fn end_to_end_cpython(bench: &mut Bencher) {
     });
 }
 
+/// Comprehensive benchmark exercising most supported Python features in one test.
+/// Code is shared with test_cases/bench__kitchen_sink.py
+/// Expected result: 3 + 1 + 10 + 1 + 1 + 3 + 11 + 7 + 21 = 58
+const KITCHEN_SINK_CODE: &str = include_str!("../test_cases/bench__kitchen_sink.py");
+
+/// Benchmarks comprehensive feature coverage using Monty interpreter
+fn kitchen_sink_monty(bench: &mut Bencher) {
+    let ex = Executor::new(KITCHEN_SINK_CODE, "test.py", &[]).unwrap();
+    let r = ex.run(vec![]).unwrap();
+    let int_value: i64 = r.as_ref().try_into().unwrap();
+    assert_eq!(int_value, 58);
+
+    bench.iter(|| {
+        let r = ex.run(vec![]).unwrap();
+        let int_value: i64 = r.as_ref().try_into().unwrap();
+        black_box(int_value);
+    });
+}
+
+/// Wraps test case code in a function for CPython execution.
+/// Filters out test metadata comments and adds proper indentation.
+fn wrap_for_cpython(code: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut last_expr = String::new();
+
+    for line in code.lines() {
+        // Skip test metadata comments
+        if line.starts_with("# Return=") || line.starts_with("# Raise=") || line.starts_with("# skip=") {
+            continue;
+        }
+        // Track the last non-empty, non-comment line as potential return expression
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            last_expr = line.to_string();
+        }
+        lines.push(format!("    {line}"));
+    }
+
+    // Replace last expression with return statement
+    if let Some(last) = lines.iter().rposition(|l| l.trim() == last_expr.trim()) {
+        lines[last] = format!("    return {}", last_expr.trim());
+    }
+
+    format!("def main():\n{}", lines.join("\n"))
+}
+
+/// Benchmarks comprehensive feature coverage using CPython
+fn kitchen_sink_cpython(bench: &mut Bencher) {
+    Python::with_gil(|py| {
+        let code = wrap_for_cpython(KITCHEN_SINK_CODE);
+        let fun: PyObject = PyModule::from_code(py, &code, "test.py", "main")
+            .unwrap()
+            .getattr("main")
+            .unwrap()
+            .into();
+
+        let r_py = fun.call0(py).unwrap();
+        let r: i64 = r_py.extract(py).unwrap();
+        assert_eq!(r, 58);
+
+        bench.iter(|| {
+            let r_py = fun.call0(py).unwrap();
+            let r: i64 = r_py.extract(py).unwrap();
+            black_box(r);
+        });
+    });
+}
+
 /// Configures all benchmark groups
 fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("add_two");
@@ -259,6 +327,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
     group.bench_function("monty", end_to_end_monty);
     group.bench_function("cpython", end_to_end_cpython);
+    group.finish();
+
+    let mut group = c.benchmark_group("kitchen_sink");
+    group.bench_function("monty", kitchen_sink_monty);
+    group.bench_function("cpython", kitchen_sink_cpython);
     group.finish();
 }
 
