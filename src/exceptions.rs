@@ -30,6 +30,7 @@ pub enum ExcType {
     AttributeError,
     KeyError,
     IndexError,
+    SyntaxError,
 }
 
 impl ExcType {
@@ -181,6 +182,22 @@ impl ExcType {
     #[must_use]
     pub fn type_error_indices<'c>(type_str: &str, index_type: &str) -> RunError<'c> {
         exc_fmt!(Self::TypeError; "{} indices must be integers, not '{}'", type_str, index_type).into()
+    }
+
+    /// Creates a SyntaxError for using a name before the `global` declaration.
+    ///
+    /// Matches CPython's format: `SyntaxError: name 'x' is assigned to before global declaration`
+    #[must_use]
+    pub fn syntax_error_assigned_before_global<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::SyntaxError; "name '{}' is assigned to before global declaration", name)
+    }
+
+    /// Creates a SyntaxError for using a name before the `global` declaration.
+    ///
+    /// Matches CPython's format: `SyntaxError: name 'x' is used prior to global declaration`
+    #[must_use]
+    pub fn syntax_error_used_before_global<'c>(name: &str) -> SimpleException<'c> {
+        exc_fmt!(Self::SyntaxError; "name '{}' is used prior to global declaration", name)
     }
 }
 

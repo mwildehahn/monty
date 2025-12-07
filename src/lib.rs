@@ -6,6 +6,7 @@ pub mod exceptions;
 mod expressions;
 mod function;
 mod heap;
+mod namespace;
 mod object;
 mod operators;
 mod parse;
@@ -22,6 +23,7 @@ use crate::exceptions::InternalRunError;
 pub use crate::exceptions::RunError;
 use crate::expressions::Node;
 use crate::heap::Heap;
+use crate::namespace::Namespaces;
 pub use crate::object::{InvalidInputError, PyObject};
 use crate::parse::parse;
 pub use crate::parse_error::ParseError;
@@ -67,16 +69,16 @@ impl<'c> Executor<'c> {
     /// * `inputs` - Values to fill the first N slots of the namespace (e.g., function parameters)
     pub fn run(&self, inputs: Vec<PyObject>) -> Result<PyObject, RunError<'c>> {
         let mut heap = Heap::new(self.namespace_size);
-        let namespace = self.prepare_namespace(inputs, &mut heap)?;
+        let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
 
-        let mut frame = RunFrame::new(namespace);
-        let frame_result = frame.execute(&mut heap, &self.nodes);
+        let frame = RunFrame::new();
+        let result = frame.execute(&mut namespaces, &mut heap, &self.nodes);
 
-        // Clean up the frame's namespace to avoid reference counting errors
+        // Clean up the global namespace before returning (only needed with dec-ref-check)
         #[cfg(feature = "dec-ref-check")]
-        frame.drop_with_heap(&mut heap);
+        namespaces.drop_global_with_heap(&mut heap);
 
-        frame_result.map(|frame_exit| PyObject::new(frame_exit, &mut heap))
+        result.map(|frame_exit| PyObject::new(frame_exit, &mut heap))
     }
 
     /// Executes the code and returns both the result and reference count data.
@@ -94,16 +96,17 @@ impl<'c> Executor<'c> {
     /// Only available when the `ref-counting` feature is enabled.
     #[cfg(feature = "ref-counting")]
     pub fn run_ref_counts(&self, inputs: Vec<PyObject>) -> RunRefCountsResult<'c> {
+        use crate::value::Value;
         use std::collections::HashSet;
 
         let mut heap = Heap::new(self.namespace_size);
-        let namespace = self.prepare_namespace(inputs, &mut heap)?;
+        let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
 
-        let mut frame = RunFrame::new(namespace);
-        let result = frame.execute(&mut heap, &self.nodes);
+        let frame = RunFrame::new();
+        let result = frame.execute(&mut namespaces, &mut heap, &self.nodes);
 
         // Compute ref counts before consuming the heap
-        let final_namespace = frame.into_namespace();
+        let final_namespace = namespaces.into_global();
         let mut counts = AHashMap::new();
         let mut unique_ids = HashSet::new();
 
@@ -125,18 +128,18 @@ impl<'c> Executor<'c> {
         Ok((python_value, ref_count_data))
     }
 
-    /// Prepares the namespace for execution by filling input slots and padding with Undefined.
+    /// Prepares the namespace namespaces for execution.
     ///
-    /// Converts each `PyObject` input to an `Object`, allocating on the heap if needed.
-    /// Returns the prepared namespace or an error if there are too many inputs or invalid input types.
-    fn prepare_namespace<'e>(
+    /// Converts each `PyObject` input to a `Value`, allocating on the heap if needed.
+    /// Returns the prepared Namespaces or an error if there are too many inputs or invalid input types.
+    fn prepare_namespaces<'e>(
         &self,
         inputs: Vec<PyObject>,
         heap: &mut Heap<'c, 'e>,
-    ) -> Result<Vec<Value<'c, 'e>>, InternalRunError> {
+    ) -> Result<Namespaces<'c, 'e>, InternalRunError> {
         let Some(extra) = self.namespace_size.checked_sub(inputs.len()) else {
             return Err(InternalRunError::Error(
-                format!("input length should be <={}", self.namespace_size).into(),
+                format!("input length should be <= {}", self.namespace_size).into(),
             ));
         };
         // Convert each PyObject to a Value, propagating any invalid input errors
@@ -148,7 +151,7 @@ impl<'c> Executor<'c> {
         if extra > 0 {
             namespace.extend((0..extra).map(|_| Value::Undefined));
         }
-        Ok(namespace)
+        Ok(Namespaces::new(namespace))
     }
 }
 

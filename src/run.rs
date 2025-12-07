@@ -1,11 +1,12 @@
 use crate::args::ArgValues;
-use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use, namespace_get_mut};
+use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use};
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
 };
-use crate::expressions::{ExprLoc, FrameExit, Identifier, Node};
+use crate::expressions::{ExprLoc, FrameExit, Identifier, NameScope, Node};
 use crate::function::Function;
 use crate::heap::Heap;
+use crate::namespace::{Namespaces, GLOBAL_NS_IDX};
 use crate::operators::Operator;
 use crate::parse::CodeRange;
 use crate::value::Value;
@@ -13,100 +14,120 @@ use crate::values::PyTrait;
 
 pub type RunResult<'c, T> = Result<T, RunError<'c>>;
 
+/// Represents an execution frame with an index into Namespaces.
+///
+/// At module level, `local_idx == GLOBAL_NS_IDX` (same namespace).
+/// In functions, `local_idx` points to the function's local namespace.
+/// Global variables always use `GLOBAL_NS_IDX` (0) directly.
+///
+/// # Future: `nonlocal` Support
+///
+/// This design naturally extends to support `nonlocal` by adding an
+/// `enclosing_idx: Option<usize>` field for nested functions.
+/// The `NameScope` enum can then include `Enclosing(usize)` to access
+/// enclosing function namespaces.
+///
+/// TODO: Add enclosing_idx field for nonlocal support
 #[derive(Debug)]
-pub(crate) struct RunFrame<'c, 'e> {
-    namespace: Vec<Value<'c, 'e>>,
+pub(crate) struct RunFrame<'c> {
+    /// Index of this frame's local namespace in Namespaces.
+    local_idx: usize,
+    /// Parent stack frame for error reporting.
     parent: Option<StackFrame<'c>>,
     /// The name of the current frame (function name or "<module>").
     name: &'c str,
 }
 
-impl<'c, 'e> RunFrame<'c, 'e>
-where
-    'c: 'e,
-{
-    pub fn new(namespace: Vec<Value<'c, 'e>>) -> Self {
+impl<'c> RunFrame<'c> {
+    /// Creates a new frame for module-level execution.
+    ///
+    /// At module level, `local_idx` is `GLOBAL_NS_IDX` (0).
+    pub fn new() -> Self {
         Self {
-            namespace,
+            local_idx: GLOBAL_NS_IDX,
             parent: None,
             name: "<module>",
         }
     }
 
-    /// Creates a new frame for function execution with captured closure cells.
-    pub fn new_for_function(namespace: Vec<Value<'c, 'e>>, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
+    /// Creates a new frame for function execution.
+    ///
+    /// The function's local namespace is at `local_idx`. Global variables
+    /// always use `GLOBAL_NS_IDX` directly.
+    ///
+    /// TODO: Add enclosing_idx parameter for nonlocal support in nested functions
+    pub fn new_for_function(local_idx: usize, name: &'c str, parent: Option<StackFrame<'c>>) -> Self {
         Self {
-            namespace,
+            local_idx,
             parent,
             name,
         }
     }
 
-    /// Consumes the frame and returns the namespace for inspection (e.g., ref-count testing).
-    ///
-    /// Only available when the `ref-counting` feature is enabled.
-    #[cfg(feature = "ref-counting")]
-    pub fn into_namespace(self) -> Vec<Value<'c, 'e>> {
-        self.namespace
-    }
-
-    /// Cleans up all values in the namespace by properly decrementing reference counts.
-    ///
-    /// This must be called before dropping the frame to properly clean up heap-allocated
-    /// values. When the `dec-ref-check` feature is enabled, failing to call this will
-    /// cause a panic if any `Value::Ref` values are in the namespace.
-    #[cfg(feature = "dec-ref-check")]
-    pub fn drop_with_heap(self, heap: &mut Heap<'c, 'e>) {
-        for obj in self.namespace {
-            obj.drop_with_heap(heap);
-        }
-    }
-
-    pub fn execute(&mut self, heap: &mut Heap<'c, 'e>, nodes: &'e [Node<'c>]) -> RunResult<'c, FrameExit<'c, 'e>> {
+    pub fn execute<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
+        heap: &mut Heap<'c, 'e>,
+        nodes: &'e [Node<'c>],
+    ) -> RunResult<'c, FrameExit<'c, 'e>>
+    where
+        'c: 'e,
+    {
         for node in nodes {
-            if let Some(leave) = self.execute_node(heap, node)? {
+            if let Some(leave) = self.execute_node(namespaces, heap, node)? {
                 return Ok(leave);
             }
         }
         Ok(FrameExit::Return(Value::None))
     }
 
-    fn execute_node(
-        &mut self,
+    fn execute_node<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         node: &'e Node<'c>,
-    ) -> RunResult<'c, Option<FrameExit<'c, 'e>>> {
+    ) -> RunResult<'c, Option<FrameExit<'c, 'e>>>
+    where
+        'c: 'e,
+    {
         match node {
             Node::Expr(expr) => {
-                if let Err(mut e) = evaluate_discard(&mut self.namespace, heap, expr) {
+                if let Err(mut e) = evaluate_discard(namespaces, self.local_idx, heap, expr) {
                     set_name(self.name, &mut e);
                     return Err(e);
                 }
             }
-            Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(heap, expr)?))),
+            Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(namespaces, heap, expr)?))),
             Node::ReturnNone => return Ok(Some(FrameExit::Return(Value::None))),
-            Node::Raise(exc) => self.raise(heap, exc.as_ref())?,
-            Node::Assert { test, msg } => self.assert_(heap, test, msg.as_ref())?,
-            Node::Assign { target, object } => self.assign(heap, target, object)?,
-            Node::OpAssign { target, op, object } => self.op_assign(heap, target, op, object)?,
+            Node::Raise(exc) => self.raise(namespaces, heap, exc.as_ref())?,
+            Node::Assert { test, msg } => self.assert_(namespaces, heap, test, msg.as_ref())?,
+            Node::Assign { target, object } => self.assign(namespaces, heap, target, object)?,
+            Node::OpAssign { target, op, object } => self.op_assign(namespaces, heap, target, op, object)?,
             Node::SubscriptAssign { target, index, value } => {
-                self.subscript_assign(heap, target, index, value)?;
+                self.subscript_assign(namespaces, heap, target, index, value)?;
             }
             Node::For {
                 target,
                 iter,
                 body,
                 or_else,
-            } => self.for_loop(heap, target, iter, body, or_else)?,
-            Node::If { test, body, or_else } => self.if_(heap, test, body, or_else)?,
-            Node::FunctionDef(function) => self.define_function(heap, function),
+            } => self.for_loop(namespaces, heap, target, iter, body, or_else)?,
+            Node::If { test, body, or_else } => self.if_(namespaces, heap, test, body, or_else)?,
+            Node::FunctionDef(function) => self.define_function(namespaces, heap, function),
         }
         Ok(None)
     }
 
-    fn execute_expr(&mut self, heap: &mut Heap<'c, 'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, Value<'c, 'e>> {
-        // it seems the struct creation is optimized away, and has no cost
-        match evaluate_use(&mut self.namespace, heap, expr) {
+    fn execute_expr<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
+        heap: &mut Heap<'c, 'e>,
+        expr: &'e ExprLoc<'c>,
+    ) -> RunResult<'c, Value<'c, 'e>>
+    where
+        'c: 'e,
+    {
+        match evaluate_use(namespaces, self.local_idx, heap, expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
@@ -115,8 +136,16 @@ where
         }
     }
 
-    fn execute_expr_bool(&mut self, heap: &mut Heap<'c, 'e>, expr: &'e ExprLoc<'c>) -> RunResult<'c, bool> {
-        match evaluate_bool(&mut self.namespace, heap, expr) {
+    fn execute_expr_bool<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
+        heap: &mut Heap<'c, 'e>,
+        expr: &'e ExprLoc<'c>,
+    ) -> RunResult<'c, bool>
+    where
+        'c: 'e,
+    {
+        match evaluate_bool(namespaces, self.local_idx, heap, expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 set_name(self.name, &mut e);
@@ -131,9 +160,17 @@ where
     /// * Exception instance (Value::Exc) - raise directly
     /// * Exception type (Value::Callable with ExcType) - instantiate then raise
     /// * Anything else - TypeError
-    fn raise(&mut self, heap: &mut Heap<'c, 'e>, op_exc_expr: Option<&'e ExprLoc<'c>>) -> RunResult<'c, ()> {
+    fn raise<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
+        heap: &mut Heap<'c, 'e>,
+        op_exc_expr: Option<&'e ExprLoc<'c>>,
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
         if let Some(exc_expr) = op_exc_expr {
-            let value = self.execute_expr(heap, exc_expr)?;
+            let value = self.execute_expr(namespaces, heap, exc_expr)?;
             match &value {
                 Value::Exc(_) => {
                     // Match on the reference then use into_exc() due to issues with destructuring Value
@@ -141,7 +178,7 @@ where
                     return Err(exc.with_frame(self.stack_frame(&exc_expr.position)).into());
                 }
                 Value::Callable(callable) => {
-                    let result = callable.call(&mut self.namespace, heap, ArgValues::Zero)?;
+                    let result = callable.call(namespaces, self.local_idx, heap, ArgValues::Zero)?;
                     // Drop the original callable value
                     if matches!(&result, Value::Exc(_)) {
                         value.drop_with_heap(heap);
@@ -162,15 +199,24 @@ where
     /// `AssertionError` if the test is falsy.
     ///
     /// If a message expression is provided, it is evaluated and used as the exception message.
-    fn assert_(
-        &mut self,
+    fn assert_<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         test: &'e ExprLoc<'c>,
         msg: Option<&'e ExprLoc<'c>>,
-    ) -> RunResult<'c, ()> {
-        if !self.execute_expr_bool(heap, test)? {
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        if !self.execute_expr_bool(namespaces, heap, test)? {
             let msg = if let Some(msg_expr) = msg {
-                Some(self.execute_expr(heap, msg_expr)?.py_str(heap).to_string().into())
+                Some(
+                    self.execute_expr(namespaces, heap, msg_expr)?
+                        .py_str(heap)
+                        .to_string()
+                        .into(),
+                )
             } else {
                 None
             };
@@ -181,28 +227,41 @@ where
         Ok(())
     }
 
-    fn assign(
-        &mut self,
+    fn assign<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         target: &'e Identifier<'c>,
         expr: &'e ExprLoc<'c>,
-    ) -> RunResult<'c, ()> {
-        let new_value = self.execute_expr(heap, expr)?;
-        let old_value = std::mem::replace(&mut self.namespace[target.heap_id()], new_value);
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        let new_value = self.execute_expr(namespaces, heap, expr)?;
+        let ns_idx = match target.scope {
+            NameScope::Local => self.local_idx,
+            NameScope::Global => GLOBAL_NS_IDX,
+        };
+        let namespace = namespaces.get_mut(ns_idx);
+        let old_value = std::mem::replace(&mut namespace[target.heap_id()], new_value);
         // Drop the old value properly (dec_ref for Refs, no-op for others)
         old_value.drop_with_heap(heap);
         Ok(())
     }
 
-    fn op_assign(
-        &mut self,
+    fn op_assign<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         target: &Identifier<'c>,
         op: &Operator,
         expr: &'e ExprLoc<'c>,
-    ) -> RunResult<'c, ()> {
-        let rhs = self.execute_expr(heap, expr)?;
-        let target_val = namespace_get_mut(&mut self.namespace, target)?;
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        let rhs = self.execute_expr(namespaces, heap, expr)?;
+        let target_val = namespaces.get_var_mut(self.local_idx, target)?;
         let ok = match op {
             Operator::Add => target_val.py_iadd(rhs, heap, None),
             _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
@@ -218,16 +277,20 @@ where
         }
     }
 
-    fn subscript_assign(
-        &mut self,
+    fn subscript_assign<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         target: &Identifier<'c>,
         index: &'e ExprLoc<'c>,
         value: &'e ExprLoc<'c>,
-    ) -> RunResult<'c, ()> {
-        let key = self.execute_expr(heap, index)?;
-        let val = self.execute_expr(heap, value)?;
-        let target_val = namespace_get_mut(&mut self.namespace, target)?;
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        let key = self.execute_expr(namespaces, heap, index)?;
+        let val = self.execute_expr(namespaces, heap, value)?;
+        let target_val = namespaces.get_var_mut(self.local_idx, target)?;
         if let Value::Ref(id) = target_val {
             let id = *id;
             heap.with_entry_mut(id, |heap, data| data.py_setitem(key, val, heap))
@@ -238,42 +301,60 @@ where
         }
     }
 
-    fn for_loop(
-        &mut self,
+    fn for_loop<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         target: &Identifier,
         iter: &'e ExprLoc<'c>,
         body: &'e [Node<'c>],
         _or_else: &'e [Node<'c>],
-    ) -> RunResult<'c, ()> {
-        let Value::Range(range_size) = self.execute_expr(heap, iter)? else {
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        let Value::Range(range_size) = self.execute_expr(namespaces, heap, iter)? else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
         };
 
         for value in 0i64..range_size {
-            self.namespace[target.heap_id()] = Value::Int(value);
-            self.execute(heap, body)?;
+            // For loop target is always local scope
+            let namespace = namespaces.get_mut(self.local_idx);
+            namespace[target.heap_id()] = Value::Int(value);
+            self.execute(namespaces, heap, body)?;
         }
         Ok(())
     }
 
-    fn if_(
-        &mut self,
+    fn if_<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
         heap: &mut Heap<'c, 'e>,
         test: &'e ExprLoc<'c>,
         body: &'e [Node<'c>],
         or_else: &'e [Node<'c>],
-    ) -> RunResult<'c, ()> {
-        if self.execute_expr_bool(heap, test)? {
-            self.execute(heap, body)?;
+    ) -> RunResult<'c, ()>
+    where
+        'c: 'e,
+    {
+        if self.execute_expr_bool(namespaces, heap, test)? {
+            self.execute(namespaces, heap, body)?;
         } else {
-            self.execute(heap, or_else)?;
+            self.execute(namespaces, heap, or_else)?;
         }
         Ok(())
     }
 
-    fn define_function(&mut self, heap: &mut Heap<'c, 'e>, function: &'e Function<'c>) {
-        let old_value = std::mem::replace(&mut self.namespace[function.name.heap_id()], Value::Function(function));
+    fn define_function<'e>(
+        &self,
+        namespaces: &mut Namespaces<'c, 'e>,
+        heap: &mut Heap<'c, 'e>,
+        function: &'e Function<'c>,
+    ) where
+        'c: 'e,
+    {
+        let namespace = namespaces.get_mut(self.local_idx);
+        let old_value = std::mem::replace(&mut namespace[function.name.heap_id()], Value::Function(function));
         // Drop the old value properly (dec_ref for Refs, no-op for others)
         old_value.drop_with_heap(heap);
     }

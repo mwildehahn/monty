@@ -4,10 +4,10 @@ use std::borrow::Cow;
 use crate::{
     args::ArgValues,
     builtins::Builtins,
-    evaluate::namespace_get_mut,
     exceptions::{exc_fmt, ExcType},
     expressions::Identifier,
     heap::Heap,
+    namespace::Namespaces,
     run::RunResult,
     value::Value,
     values::PyTrait,
@@ -45,9 +45,17 @@ impl fmt::Display for Callable<'_> {
 }
 
 impl<'c> Callable<'c> {
+    /// Calls this callable with the given arguments.
+    ///
+    /// # Arguments
+    /// * `namespaces` - The namespace namespaces containing all namespaces
+    /// * `local_idx` - Index of the local namespace in namespaces
+    /// * `heap` - The heap for allocating objects
+    /// * `args` - The arguments to pass to the callable
     pub fn call<'e>(
         &self,
-        namespace: &mut [Value<'c, 'e>],
+        namespaces: &mut Namespaces<'c, 'e>,
+        local_idx: usize,
         heap: &mut Heap<'c, 'e>,
         args: ArgValues<'c, 'e>,
     ) -> RunResult<'c, Value<'c, 'e>> {
@@ -56,14 +64,14 @@ impl<'c> Callable<'c> {
             Callable::ExcType(exc) => exc.call(heap, args),
             Callable::Name(ident) => {
                 // Look up the callable in the namespace and clone it to release the borrow
-                // before making the recursive call that needs `namespace`
-                let callable_obj = namespace_get_mut(namespace, ident)?;
+                // before making the recursive call that needs namespaces
+                let callable_obj = namespaces.get_var_mut(local_idx, ident)?;
                 match callable_obj {
                     Value::Callable(callable) => {
                         let callable = callable.clone();
-                        callable.call(namespace, heap, args)
+                        callable.call(namespaces, local_idx, heap, args)
                     }
-                    Value::Function(f) => f.call(heap, args),
+                    Value::Function(f) => f.call(namespaces, heap, args),
                     _ => {
                         let type_name = callable_obj.py_type(heap);
                         let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");

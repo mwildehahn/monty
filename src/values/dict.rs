@@ -12,7 +12,7 @@ use crate::values::PyTrait;
 
 /// Python dict type, wrapping an IndexMap to preserve insertion order.
 ///
-/// This type provides Python dict semantics including dynamic key-value storage,
+/// This type provides Python dict semantics including dynamic key-value namespaces,
 /// reference counting for heap values, and standard dict methods like get, keys,
 /// values, items, and pop.
 ///

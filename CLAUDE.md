@@ -58,11 +58,11 @@ Commands:
 # Build the project
 cargo build
 
-# Run tests
-cargo test
+# Run tests (this is the best way to run all tests as it enables the dec-ref-check feature)
+make test
 
 # Run a specific test
-cargo test execute_ok_add_ints
+cargo test --features dec-ref-check execute_ok_add_ints
 
 # Run the interpreter on a Python file
 cargo run -- <file.py>
@@ -82,7 +82,13 @@ You should prefer single quotes for strings in python tests.
 - `# Return.type=typename` - Check `type()` output
 - `# Raise=Exception('message')` - Expect exception
 - `# ParseError=message` - Expect parse error
-- `# ref-counts={...}` - To check reference counts of heap-allocated objects
+- `# ref-counts={...}` - To check reference counts of heap-allocated values
+- No expectation comment - Just verify code runs without exception (useful for assert-based tests)
+
+**Skip directive** (optional, on first line of file):
+- `# skip=cpython` - Skip CPython test (only run on Monty)
+- `# skip=monty` - Skip Monty test (only run on CPython)
+- `# skip=monty,cpython` - Skip both (useful for temporarily disabling a test)
 
 Run `make lint-py` after adding tests to format them.
 
@@ -92,11 +98,11 @@ These tests are run via `datatest-stable` harness in `tests/datatest_runner.rs`.
 
 ## Reference Counting
 
-Heap-allocated objects (`Object::Ref`) use manual reference counting. Key rules:
+Heap-allocated values (`Value::Ref`) use manual reference counting. Key rules:
 
-- **Cloning**: Never use `.clone()` on `Object`. Use `clone_with_heap(heap)` which increments refcounts for `Ref` variants.
-- **Dropping**: Call `drop_with_heap(heap)` when discarding an `Object` that may be a `Ref`.
-- **Borrow conflicts**: When you need to read from the heap and then mutate it, use `copy_for_extend()` to copy the `Object` without incrementing refcount, then call `heap.inc_ref()` separately after the borrow ends.
+- **Cloning**: Use `clone_with_heap(heap)` which increments refcounts for `Ref` variants.
+- **Dropping**: Call `drop_with_heap(heap)` when discarding an `Value` that may be a `Ref`.
+- **Borrow conflicts**: When you need to read from the heap and then mutate it, use `copy_for_extend()` to copy the `Value` without incrementing refcount, then call `heap.inc_ref()` separately after the borrow ends.
 
 Container types (`List`, `Tuple`, `Dict`) also have `clone_with_heap()` methods.
 

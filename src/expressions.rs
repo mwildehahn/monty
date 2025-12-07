@@ -9,27 +9,57 @@ use crate::value::{Attr, Value};
 use crate::values::bytes::bytes_repr;
 use crate::values::str::string_repr;
 
+/// Indicates which namespace a variable reference belongs to.
+///
+/// This is determined at prepare time based on Python's scoping rules:
+/// - Variables assigned in a function are Local (unless declared `global`)
+/// - Variables only read (not assigned) that exist at module level are Global
+/// - The `global` keyword explicitly marks a variable as Global
+///
+/// # Future: `nonlocal` Support
+///
+/// To support `nonlocal`, add an `Enclosing(usize)` variant where the usize is the
+/// namespace index of the enclosing function. The prepare phase would need to track
+/// enclosing function namespace indices when resolving nonlocal declarations.
+///
+/// TODO: Add Enclosing(usize) variant for nonlocal support
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) enum NameScope {
+    /// Variable is in the current frame's local namespace
+    #[default]
+    Local,
+    /// Variable is in the module-level global namespace
+    Global,
+    // TODO: Enclosing(usize) for nonlocal support - index into Namespaces
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Identifier<'c> {
     pub position: CodeRange<'c>,
     pub name: &'c str,
     opt_heap_id: Option<usize>,
+    /// Which namespace this identifier refers to (determined at prepare time)
+    pub scope: NameScope,
 }
 
 impl<'c> Identifier<'c> {
+    /// Creates a new identifier with unknown scope (to be resolved during prepare phase).
     pub fn new(name: &'c str, position: CodeRange<'c>) -> Self {
         Self {
             name,
             position,
             opt_heap_id: None,
+            scope: NameScope::Local,
         }
     }
 
-    pub fn new_with_heap(name: &'c str, position: CodeRange<'c>, heap_id: usize) -> Self {
+    /// Creates a new identifier with resolved namespace index and explicit scope.
+    pub fn new_with_scope(name: &'c str, position: CodeRange<'c>, heap_id: usize, scope: NameScope) -> Self {
         Self {
             name,
             position,
             opt_heap_id: Some(heap_id),
+            scope,
         }
     }
 

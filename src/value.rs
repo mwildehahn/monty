@@ -773,7 +773,7 @@ const INTERN_LEN_ROTATE: u32 = usize::BITS / 2;
 /// Mixes a slice pointer and its length into a deterministic identity
 /// that lives in a reserved numeric range controlled by `tag`.
 ///
-/// This lets us use literal storage addresses for stable `id()` values without
+/// This lets us use literal namespaces addresses for stable `id()` values without
 /// ever overlapping the sequential heap `HeapId` space.
 #[inline]
 fn interned_id_from_parts(ptr: usize, len: usize, tag: usize, mask: usize) -> usize {

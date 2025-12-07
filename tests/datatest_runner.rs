@@ -5,23 +5,14 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-/// Specifies which interpreters a test should run on.
+/// Specifies which interpreters a test should skip.
 ///
-/// Parsed from an optional `# test=monty,cpython` comment at the start of a test file.
-/// If not present, defaults to running on both interpreters.
-#[derive(Debug, Clone)]
-struct TestTargets {
+/// Parsed from an optional `# skip=monty,cpython` comment at the start of a test file.
+/// If not present, defaults to running on both interpreters (both fields false).
+#[derive(Debug, Clone, Default)]
+struct TestSkips {
     monty: bool,
     cpython: bool,
-}
-
-impl Default for TestTargets {
-    fn default() -> Self {
-        Self {
-            monty: true,
-            cpython: true,
-        }
-    }
 }
 
 /// Represents the expected outcome of a test fixture
@@ -40,6 +31,9 @@ enum Expectation {
     /// Expect successful execution, check ref counts of named variables.
     /// Only used when `ref-counting` feature is enabled; skipped otherwise.
     RefCounts(#[cfg_attr(not(feature = "ref-counting"), allow(dead_code))] AHashMap<String, usize>),
+    /// Expect successful execution without raising an exception (no return value check).
+    /// Used for tests that rely on asserts or just verify code runs.
+    NoException,
 }
 
 impl Expectation {
@@ -51,41 +45,43 @@ impl Expectation {
             | Expectation::ReturnStr(s)
             | Expectation::Return(s)
             | Expectation::ReturnType(s) => s,
-            Expectation::RefCounts(_) => "",
+            Expectation::RefCounts(_) | Expectation::NoException => "",
         }
     }
 }
 
-/// Parse a Python fixture file into code, expected outcome, and test targets.
+/// Parse a Python fixture file into code, expected outcome, and test skips.
 ///
-/// The file may optionally start with a `# test=monty,cpython` comment to specify
-/// which interpreters to run on. If not present, defaults to both.
+/// The file may optionally start with a `# skip=monty,cpython` comment to specify
+/// which interpreters to skip. If not present, defaults to running on both.
 ///
-/// The file MUST have an expectation comment as the LAST line:
+/// The file may have an expectation comment as the LAST line:
 /// - `# Raise=ExceptionType('message')` - Exception format
 /// - `# ParseError=message` - Parse error format
 /// - `# Return.str=value` - Check py_str() output
 /// - `# Return=value` - Check py_repr() output
 /// - `# Return.type=typename` - Check py_type() output
 /// - `# ref-counts={'var': count, ...}` - Check ref counts of named heap variables
-fn parse_fixture(content: &str) -> (String, Expectation, TestTargets) {
+///
+/// If no expectation comment is present, the test just verifies the code runs without exception.
+fn parse_fixture(content: &str) -> (String, Expectation, TestSkips) {
     let lines: Vec<&str> = content.lines().collect();
 
     assert!(!lines.is_empty(), "Empty fixture file");
 
-    // Check for test targets comment at the start of the file
-    let (targets, code_start_idx) = if let Some(first_line) = lines.first() {
-        if let Some(targets_str) = first_line.strip_prefix("# test=") {
-            let targets = TestTargets {
-                monty: targets_str.contains("monty"),
-                cpython: targets_str.contains("cpython"),
+    // Check for skip comment at the start of the file
+    let (skips, code_start_idx) = if let Some(first_line) = lines.first() {
+        if let Some(skip_str) = first_line.strip_prefix("# skip=") {
+            let skips = TestSkips {
+                monty: skip_str.contains("monty"),
+                cpython: skip_str.contains("cpython"),
             };
-            (targets, 1)
+            (skips, 1)
         } else {
-            (TestTargets::default(), 0)
+            (TestSkips::default(), 0)
         }
     } else {
-        (TestTargets::default(), 0)
+        (TestSkips::default(), 0)
     };
 
     // Check if first code line has an expectation (this is an error)
@@ -98,33 +94,50 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestTargets) {
         }
     }
 
-    // Get the last line (must be the expectation)
+    // Get the last line and check if it's an expectation comment
     let last_line = lines.last().unwrap();
-    let expectation_line = last_line;
-    let code_lines = &lines[code_start_idx..lines.len() - 1];
 
-    // Parse expectation from comment line
+    // Parse expectation from comment line if present
     // Note: Check more specific patterns first (Return.str, Return.type, ref-counts) before general Return
-    let expectation = if let Some(expected) = expectation_line.strip_prefix("# ref-counts=") {
-        Expectation::RefCounts(parse_ref_counts(expected))
-    } else if let Some(expected) = expectation_line.strip_prefix("# Return.str=") {
-        Expectation::ReturnStr(expected.to_string())
-    } else if let Some(expected) = expectation_line.strip_prefix("# Return.type=") {
-        Expectation::ReturnType(expected.to_string())
-    } else if let Some(expected) = expectation_line.strip_prefix("# Return=") {
-        Expectation::Return(expected.to_string())
-    } else if let Some(expected) = expectation_line.strip_prefix("# Raise=") {
-        Expectation::Raise(expected.to_string())
-    } else if let Some(expected) = expectation_line.strip_prefix("# ParseError=") {
-        Expectation::ParseError(expected.to_string())
+    let (expectation, code_lines) = if let Some(expected) = last_line.strip_prefix("# ref-counts=") {
+        (
+            Expectation::RefCounts(parse_ref_counts(expected)),
+            &lines[code_start_idx..lines.len() - 1],
+        )
+    } else if let Some(expected) = last_line.strip_prefix("# Return.str=") {
+        (
+            Expectation::ReturnStr(expected.to_string()),
+            &lines[code_start_idx..lines.len() - 1],
+        )
+    } else if let Some(expected) = last_line.strip_prefix("# Return.type=") {
+        (
+            Expectation::ReturnType(expected.to_string()),
+            &lines[code_start_idx..lines.len() - 1],
+        )
+    } else if let Some(expected) = last_line.strip_prefix("# Return=") {
+        (
+            Expectation::Return(expected.to_string()),
+            &lines[code_start_idx..lines.len() - 1],
+        )
+    } else if let Some(expected) = last_line.strip_prefix("# Raise=") {
+        (
+            Expectation::Raise(expected.to_string()),
+            &lines[code_start_idx..lines.len() - 1],
+        )
+    } else if let Some(expected) = last_line.strip_prefix("# ParseError=") {
+        (
+            Expectation::ParseError(expected.to_string()),
+            &lines[code_start_idx..lines.len() - 1],
+        )
     } else {
-        panic!("Invalid expectation format in comment line: {expectation_line}");
+        // No expectation comment - just run and check it doesn't raise
+        (Expectation::NoException, &lines[code_start_idx..])
     };
 
-    // Code is everything except the test targets comment and expectation comment
+    // Code is everything except the skip comment (and expectation comment if present)
     let code = code_lines.join("\n");
 
-    (code, expectation, targets)
+    (code, expectation, skips)
 }
 
 /// Parses the ref-counts format: {'var': count, 'var2': count2}
@@ -178,7 +191,7 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                         );
                         assert_eq!(&actual, expected, "[{test_name}] ref-counts mismatch");
                     }
-                    Err(e) => panic!("[{test_name}] Runtime error: {e:?}"),
+                    Err(e) => panic!("[{test_name}] Runtime error:\n{e}"),
                 }
             }
             Err(parse_err) => {
@@ -209,6 +222,9 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                     Expectation::RefCounts(_) => {
                         // Skip ref-count tests when feature is disabled
                     }
+                    Expectation::NoException => {
+                        // Success - code ran without exception as expected
+                    }
                     _ => panic!("[{test_name}] Expected return, got different expectation type"),
                 },
                 Err(e) => {
@@ -220,7 +236,7 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                         };
                         assert_eq!(output, expected, "[{test_name}] Exception mismatch");
                     } else {
-                        panic!("[{test_name}] Unexpected error: {e:?}");
+                        panic!("[{test_name}] Unexpected error:\n{e}");
                     }
                 }
             }
@@ -236,16 +252,13 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
     }
 }
 
-/// Wrap Python code in a function that returns the last expression's value.
+/// Split Python code into statements and a final expression to evaluate.
 ///
-/// The last non-empty line is treated as an expression whose value should be returned.
-/// All other lines are executed as statements.
+/// For Return expectations, the last non-empty line is the expression to evaluate.
+/// For Raise/NoException, the entire code is statements (returns None for expression).
 ///
-/// If `add_return` is false, all lines are wrapped as-is (for code that raises exceptions).
-///
-/// Special case: if the last line is a statement (like `assert`), it's added as-is
-/// followed by `return None`.
-fn wrap_code_in_function(code: &str, add_return: bool) -> String {
+/// Returns (statements_code, optional_final_expression).
+fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option<String>) {
     let lines: Vec<&str> = code.lines().collect();
 
     // Find the last non-empty line
@@ -254,48 +267,24 @@ fn wrap_code_in_function(code: &str, add_return: bool) -> String {
         .rposition(|line| !line.trim().is_empty())
         .expect("Empty code");
 
-    let mut result = String::from("def __test__():\n");
-
-    if add_return {
-        // Add all lines except the last, indented
-        for line in &lines[..last_idx] {
-            if line.trim().is_empty() {
-                result.push('\n');
-            } else {
-                result.push_str("    ");
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
-
+    if need_return_value {
         let last_line = lines[last_idx].trim();
-        // Check if the last line is a statement (can't be returned as an expression)
+
+        // Check if the last line is a statement (can't be evaluated as an expression)
         // Matches both `assert expr` and `assert(expr)` forms
         if last_line.starts_with("assert ") || last_line.starts_with("assert(") {
-            // Add as statement, then return None
-            result.push_str("    ");
-            result.push_str(lines[last_idx]);
-            result.push_str("\n    return None\n");
+            // All code is statements, no expression to evaluate
+            (lines[..=last_idx].join("\n"), None)
         } else {
-            // Add the last line as a return statement
-            result.push_str("    return ");
-            result.push_str(lines[last_idx]);
-            result.push('\n');
+            // Everything except last line is statements, last line is the expression
+            let statements = lines[..last_idx].join("\n");
+            let expr = last_line.to_string();
+            (statements, Some(expr))
         }
     } else {
-        // Add all lines as-is (for exception tests)
-        for line in &lines[..=last_idx] {
-            if line.trim().is_empty() {
-                result.push('\n');
-            } else {
-                result.push_str("    ");
-                result.push_str(line);
-                result.push('\n');
-            }
-        }
+        // All code is statements (for exception tests or NoException)
+        (lines[..=last_idx].join("\n"), None)
     }
-
-    result
 }
 
 /// Run a test through CPython to verify Monty produces the same output
@@ -303,6 +292,9 @@ fn wrap_code_in_function(code: &str, add_return: bool) -> String {
 /// This function executes the same Python code via CPython (using pyo3) and
 /// compares the result with the expected value. This ensures Monty behaves
 /// identically to CPython.
+///
+/// Code is executed at module level (not wrapped in a function) so that
+/// `global` keyword semantics work correctly.
 ///
 /// ParseError tests are skipped since Monty uses a different parser (ruff).
 fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
@@ -312,72 +304,103 @@ fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
     }
 
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
-    let add_return = !matches!(expectation, Expectation::Raise(_));
-    let wrapped = wrap_code_in_function(code, add_return);
+    let need_return_value = matches!(
+        expectation,
+        Expectation::Return(_) | Expectation::ReturnStr(_) | Expectation::ReturnType(_)
+    );
+    let (statements, maybe_expr) = split_code_for_module(code, need_return_value);
 
-    let result = Python::with_gil(|py| {
-        // Execute the wrapped code to define __test__
+    let result: Option<String> = Python::with_gil(|py| {
+        // Execute statements at module level
         let globals = pyo3::types::PyDict::new(py);
-        py.run(&wrapped, Some(globals), None)
-            .unwrap_or_else(|e| panic!("[{test_name}] CPython failed to define __test__: {e}"));
 
-        // Get and call the __test__ function
-        let test_fn = globals.get_item("__test__").expect("__test__ not defined");
+        // Run the statements
+        let stmt_result = py.run(&statements, Some(globals), None);
 
-        match test_fn.call0() {
-            Ok(result) => {
-                // Code returned successfully - format based on expectation type
-                match expectation {
-                    Expectation::Return(_) => result.repr().unwrap().to_string(),
-                    Expectation::ReturnStr(_) => result.str().unwrap().to_string(),
-                    Expectation::ReturnType(_) => result.get_type().name().unwrap().to_string(),
-                    Expectation::Raise(_) => {
-                        panic!("[{test_name}] Expected exception but code completed normally")
+        // Handle exception during statement execution
+        if let Err(e) = stmt_result {
+            if matches!(expectation, Expectation::NoException) {
+                panic!("[{test_name}] Expected no exception but got: {e}");
+            }
+            if matches!(expectation, Expectation::Raise(_)) {
+                return Some(format_cpython_exception(py, &e));
+            }
+            panic!("[{test_name}] Unexpected CPython exception during statements: {e}");
+        }
+
+        // If we have an expression to evaluate, evaluate it
+        if let Some(expr) = maybe_expr {
+            match py.eval(&expr, Some(globals), None) {
+                Ok(result) => {
+                    // Code returned successfully - format based on expectation type
+                    match expectation {
+                        Expectation::Return(_) => Some(result.repr().unwrap().to_string()),
+                        Expectation::ReturnStr(_) => Some(result.str().unwrap().to_string()),
+                        Expectation::ReturnType(_) => Some(result.get_type().name().unwrap().to_string()),
+                        Expectation::Raise(_) => {
+                            panic!("[{test_name}] Expected exception but code completed normally")
+                        }
+                        Expectation::NoException | Expectation::ParseError(_) | Expectation::RefCounts(_) => {
+                            unreachable!()
+                        }
                     }
-                    Expectation::ParseError(_) => unreachable!(),
-                    Expectation::RefCounts(_) => unreachable!(),
+                }
+                Err(e) => {
+                    // Expression raised an exception
+                    if matches!(expectation, Expectation::NoException) {
+                        panic!("[{test_name}] Expected no exception but got: {e}");
+                    }
+                    if matches!(expectation, Expectation::Raise(_)) {
+                        return Some(format_cpython_exception(py, &e));
+                    }
+                    panic!("[{test_name}] Unexpected CPython exception during eval: {e}");
                 }
             }
-            Err(e) => {
-                // Code raised an exception
-                let exc_type = e.get_type(py).name().unwrap();
-                let exc_message: String = e
-                    .value(py)
-                    .getattr("args")
-                    .and_then(|args| args.get_item(0))
-                    .and_then(pyo3::PyAny::extract)
-                    .unwrap_or_default();
-
-                // Normalize function names: CPython shows "__test__.<locals>.f()" for functions
-                // defined inside the test wrapper, but Monty shows just "f()". Strip the prefix
-                // so both can use the same expectation.
-                let exc_message = exc_message.replace("__test__.<locals>.", "");
-
-                if exc_message.is_empty() {
-                    format!("{exc_type}()")
-                } else if exc_message.contains('\'') {
-                    // Use double quotes when message contains single quotes (like Python's repr)
-                    format!("{exc_type}(\"{exc_message}\")")
-                } else {
-                    // Use single quotes (default Python repr format)
-                    format!("{exc_type}('{exc_message}')")
-                }
+        } else {
+            // No expression to evaluate
+            if matches!(expectation, Expectation::Raise(_)) {
+                panic!("[{test_name}] Expected exception but code completed normally");
             }
+            None // NoException expectation - success
         }
     });
 
-    assert_eq!(
-        result,
-        expectation.expected_value(),
-        "[{test_name}] CPython result mismatch"
-    );
+    // Only compare if we have a result to compare
+    if let Some(result) = result {
+        assert_eq!(
+            result,
+            expectation.expected_value(),
+            "[{test_name}] CPython result mismatch"
+        );
+    }
+}
+
+/// Format a CPython exception into the expected format.
+fn format_cpython_exception(py: Python<'_>, e: &pyo3::PyErr) -> String {
+    let exc_type = e.get_type(py).name().unwrap();
+    let exc_message: String = e
+        .value(py)
+        .getattr("args")
+        .and_then(|args| args.get_item(0))
+        .and_then(pyo3::PyAny::extract)
+        .unwrap_or_default();
+
+    if exc_message.is_empty() {
+        format!("{exc_type}()")
+    } else if exc_message.contains('\'') {
+        // Use double quotes when message contains single quotes (like Python's repr)
+        format!("{exc_type}(\"{exc_message}\")")
+    } else {
+        // Use single quotes (default Python repr format)
+        format!("{exc_type}('{exc_message}')")
+    }
 }
 
 /// Test function that runs each fixture through Monty
 fn run_test_cases_monty(path: &Path) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
-    let (code, expectation, targets) = parse_fixture(&content);
-    if targets.monty {
+    let (code, expectation, skips) = parse_fixture(&content);
+    if !skips.monty {
         run_test(path, &code, expectation);
     }
     Ok(())
@@ -386,8 +409,8 @@ fn run_test_cases_monty(path: &Path) -> Result<(), Box<dyn Error>> {
 /// Test function that runs each fixture through CPython
 fn run_test_cases_cpython(path: &Path) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
-    let (code, expectation, targets) = parse_fixture(&content);
-    if targets.cpython {
+    let (code, expectation, skips) = parse_fixture(&content);
+    if !skips.cpython {
         run_cpython_test(path, &code, &expectation);
     }
     Ok(())

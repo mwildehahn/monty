@@ -15,6 +15,10 @@ use crate::expressions::{Expr, ExprLoc, Identifier, Literal};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::ParseError;
 
+/// Parsed AST node, intermediate representation between ruff AST and prepared nodes.
+///
+/// These nodes are created during parsing and then transformed during the prepare phase
+/// into `Node` variants with resolved names and scope information.
 #[derive(Debug, Clone)]
 pub(crate) enum ParseNode<'c> {
     Pass,
@@ -56,6 +60,11 @@ pub(crate) enum ParseNode<'c> {
         params: Vec<&'c str>,
         body: Vec<ParseNode<'c>>,
     },
+    /// Global variable declaration.
+    ///
+    /// Declares that the listed names refer to module-level (global) variables,
+    /// allowing functions to read and write them instead of creating local variables.
+    Global(Vec<&'c str>),
 }
 
 pub(crate) fn parse<'c>(code: &'c str, filename: &'c str) -> Result<Vec<ParseNode<'c>>, ParseError<'c>> {
@@ -227,7 +236,10 @@ impl<'c> Parser<'c> {
             }
             Stmt::Import(_) => Err(ParseError::Todo("Import")),
             Stmt::ImportFrom(_) => Err(ParseError::Todo("ImportFrom")),
-            Stmt::Global(_) => Err(ParseError::Todo("Global")),
+            Stmt::Global(ast::StmtGlobal { names, .. }) => {
+                let names = names.iter().map(|id| &self.code[id.range]).collect();
+                Ok(ParseNode::Global(names))
+            }
             Stmt::Nonlocal(_) => Err(ParseError::Todo("Nonlocal")),
             Stmt::Expr(ast::StmtExpr { value, .. }) => Ok(ParseNode::Expr(self.parse_expression(*value)?)),
             Stmt::Pass(_) => Ok(ParseNode::Pass),
