@@ -132,22 +132,14 @@ impl RunSnapshot {
         resource_tracker: T,
         print: &mut impl PrintWriter,
     ) -> Result<RunProgress<T>, PythonException> {
-        // Clone data needed for error handling before consuming self.executor
-        let interns = self.executor.interns.clone();
-        let source = self.executor.code.clone();
-
         let mut heap = Heap::new(self.executor.namespace_size, resource_tracker);
 
-        let namespaces = self
-            .executor
-            .prepare_namespaces(inputs, &mut heap)
-            .map_err(|e| e.into_python_exception(&interns, &source))?;
+        let namespaces = self.executor.prepare_namespaces(inputs, &mut heap)?;
 
         // Start execution from index 0 (beginning of code)
         let snapshot_tracker = SnapshotTracker::default();
         self.executor
             .run_from_position(heap, namespaces, snapshot_tracker, print)
-            .map_err(|e| e.into_python_exception(&interns, &source))
     }
 }
 
@@ -238,17 +230,13 @@ impl<T: ResourceTracker> Snapshot<T> {
         return_value: PyObject,
         print: &mut impl PrintWriter,
     ) -> Result<RunProgress<T>, PythonException> {
-        // Clone data needed for error handling before consuming self.executor
-        // This is necessary because run_from_position consumes the executor,
-        // but we need interns and source to convert errors to PythonException
-        // TODO fix
-        let interns = self.executor.interns.clone();
-        let source = self.executor.code.clone();
-
         // Convert PyObject to Value
         let value = return_value
             .to_value(&mut self.heap, &self.executor.interns)
-            .map_err(|_| RunError::internal("invalid return value type").into_python_exception(&interns, &source))?;
+            .map_err(|_| {
+                RunError::internal("invalid return value type")
+                    .into_python_exception(&self.executor.interns, &self.executor.code)
+            })?;
 
         self.namespaces.push_ext_return_value(value);
 
@@ -257,7 +245,6 @@ impl<T: ResourceTracker> Snapshot<T> {
         // Note: run_from_position consumes self.executor, but may return it in RunProgress::FunctionCall
         self.executor
             .run_from_position(self.heap, self.namespaces, snapshot_tracker, print)
-            .map_err(|e| e.into_python_exception(&interns, &source))
     }
 }
 
@@ -341,7 +328,6 @@ impl Executor {
     /// ```
     pub fn run_no_limits(&self, inputs: Vec<PyObject>) -> Result<PyObject, PythonException> {
         self.run_with_tracker(inputs, NoLimitTracker::default(), &mut StdPrint)
-            .map_err(|e| e.into_python_exception(&self.interns, &self.code))
     }
 
     /// Executes the code with configurable resource limits.
@@ -367,7 +353,6 @@ impl Executor {
     pub fn run_with_limits(&self, inputs: Vec<PyObject>, limits: ResourceLimits) -> Result<PyObject, PythonException> {
         let resource_tracker = LimitedTracker::new(limits);
         self.run_with_tracker(inputs, resource_tracker, &mut StdPrint)
-            .map_err(|e| e.into_python_exception(&self.interns, &self.code))
     }
 
     /// Executes the code with a custom print print.
@@ -383,7 +368,6 @@ impl Executor {
         print: &mut impl PrintWriter,
     ) -> Result<PyObject, PythonException> {
         self.run_with_tracker(inputs, NoLimitTracker::default(), print)
-            .map_err(|e| e.into_python_exception(&self.interns, &self.code))
     }
 
     /// Executes the code with a custom resource tracker.
@@ -402,19 +386,20 @@ impl Executor {
         inputs: Vec<PyObject>,
         resource_tracker: impl ResourceTracker,
         print: &mut impl PrintWriter,
-    ) -> Result<PyObject, RunError> {
+    ) -> Result<PyObject, PythonException> {
         let mut heap = Heap::new(self.namespace_size, resource_tracker);
         let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
 
         let mut snapshot_tracker = NoSnapshotTracker;
         let mut frame = RunFrame::module_frame(&self.interns, &mut snapshot_tracker, print);
-        let frame_exit = frame.execute(&mut namespaces, &mut heap, &self.nodes);
+        let frame_exit_result = frame.execute(&mut namespaces, &mut heap, &self.nodes);
 
         // Clean up the global namespace before returning (only needed with ref-count-panic)
         #[cfg(feature = "ref-count-panic")]
         namespaces.drop_global_with_heap(&mut heap);
 
-        frame_exit_to_object(frame_exit?, &mut heap, &self.interns)
+        frame_exit_to_object(frame_exit_result, &mut heap, &self.interns)
+            .map_err(|e| e.into_python_exception(&self.interns, &self.code))
     }
 
     /// Executes the code and returns both the result and reference count data.
@@ -435,48 +420,45 @@ impl Executor {
         use crate::value::Value;
         use std::collections::HashSet;
 
-        let run = || -> RunResult<RefCountOutput> {
-            let mut heap = Heap::new(self.namespace_size, NoLimitTracker::default());
-            let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
+        let mut heap = Heap::new(self.namespace_size, NoLimitTracker::default());
+        let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
 
-            let mut snapshot_tracker = NoSnapshotTracker;
-            let mut print_writer = StdPrint;
-            let mut frame = RunFrame::module_frame(&self.interns, &mut snapshot_tracker, &mut print_writer);
-            // Use execute() instead of execute_py_object() so the return value stays alive
-            // while we compute refcounts
-            let frame_exit = frame.execute(&mut namespaces, &mut heap, &self.nodes)?;
+        let mut snapshot_tracker = NoSnapshotTracker;
+        let mut print_writer = StdPrint;
+        let mut frame = RunFrame::module_frame(&self.interns, &mut snapshot_tracker, &mut print_writer);
+        // Use execute() instead of execute_py_object() so the return value stays alive
+        // while we compute refcounts
+        let frame_exit_result = frame.execute(&mut namespaces, &mut heap, &self.nodes);
 
-            // Compute ref counts before consuming the heap - return value is still alive in frame_exit
-            let final_namespace = namespaces.into_global();
-            let mut counts = ahash::AHashMap::new();
-            let mut unique_ids = HashSet::new();
+        // Compute ref counts before consuming the heap - return value is still alive in frame_exit
+        let final_namespace = namespaces.into_global();
+        let mut counts = ahash::AHashMap::new();
+        let mut unique_ids = HashSet::new();
 
-            for (name, &namespace_id) in &self.name_map {
-                if let Some(Value::Ref(id)) = final_namespace.get_opt(namespace_id) {
-                    counts.insert(name.clone(), heap.get_refcount(*id));
-                    unique_ids.insert(*id);
-                }
+        for (name, &namespace_id) in &self.name_map {
+            if let Some(Value::Ref(id)) = final_namespace.get_opt(namespace_id) {
+                counts.insert(name.clone(), heap.get_refcount(*id));
+                unique_ids.insert(*id);
             }
-            let unique_refs = unique_ids.len();
-            let heap_count = heap.entry_count();
+        }
+        let unique_refs = unique_ids.len();
+        let heap_count = heap.entry_count();
 
-            // Clean up the namespace after reading ref counts but before moving the heap
-            for obj in final_namespace {
-                obj.drop_with_heap(&mut heap);
-            }
+        // Clean up the namespace after reading ref counts but before moving the heap
+        for obj in final_namespace {
+            obj.drop_with_heap(&mut heap);
+        }
 
-            // Now convert the return value to PyObject (this drops the Value, decrementing refcount)
-            let py_object = frame_exit_to_object(frame_exit, &mut heap, &self.interns)?;
+        // Now convert the return value to PyObject (this drops the Value, decrementing refcount)
+        let py_object = frame_exit_to_object(frame_exit_result, &mut heap, &self.interns)
+            .map_err(|e| e.into_python_exception(&self.interns, &self.code))?;
 
-            Ok(RefCountOutput {
-                py_object,
-                counts,
-                unique_refs,
-                heap_count,
-            })
-        };
-
-        run().map_err(|e| e.into_python_exception(&self.interns, &self.code))
+        Ok(RefCountOutput {
+            py_object,
+            counts,
+            unique_refs,
+            heap_count,
+        })
     }
 
     /// Prepares the namespace namespaces for execution.
@@ -487,12 +469,12 @@ impl Executor {
         &self,
         inputs: Vec<PyObject>,
         heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<Namespaces, RunError> {
+    ) -> Result<Namespaces, PythonException> {
         let Some(extra) = self
             .namespace_size
             .checked_sub(self.external_function_ids.len() + inputs.len())
         else {
-            return Err(RunError::internal("too many inputs for namespace"));
+            return Err(PythonException::runtime_error("too many inputs for namespace"));
         };
         // register external functions in the namespace first, matching the logic in prepare
         let mut namespace: Vec<Value> = Vec::with_capacity(self.namespace_size);
@@ -504,7 +486,7 @@ impl Executor {
             namespace.push(
                 input
                     .to_value(heap, &self.interns)
-                    .map_err(|_| RunError::internal("invalid input type"))?,
+                    .map_err(|e| PythonException::runtime_error(format!("invalid input type: {e}")))?,
             );
         }
         if extra > 0 {
@@ -522,7 +504,7 @@ impl Executor {
         mut namespaces: Namespaces,
         mut snapshot_tracker: SnapshotTracker,
         print: &mut impl PrintWriter,
-    ) -> Result<RunProgress<T>, RunError> {
+    ) -> Result<RunProgress<T>, PythonException> {
         let mut frame = RunFrame::module_frame(&self.interns, &mut snapshot_tracker, print);
         let exit = match frame.execute(&mut namespaces, &mut heap, &self.nodes) {
             Ok(exit) => exit,
@@ -530,7 +512,7 @@ impl Executor {
                 // Clean up before propagating error (only needed with ref-count-panic)
                 #[cfg(feature = "ref-count-panic")]
                 namespaces.drop_global_with_heap(&mut heap);
-                return Err(e);
+                return Err(e.into_python_exception(&self.interns, &self.code));
             }
         };
 
@@ -569,11 +551,11 @@ impl Executor {
 }
 
 fn frame_exit_to_object(
-    opt_frame_exit: Option<FrameExit>,
+    frame_exit_result: RunResult<Option<FrameExit>>,
     heap: &mut Heap<impl ResourceTracker>,
     interns: &Interns,
 ) -> RunResult<PyObject> {
-    match opt_frame_exit {
+    match frame_exit_result? {
         Some(FrameExit::Return(return_value)) => Ok(PyObject::new(return_value, heap, interns)),
         Some(FrameExit::ExternalCall(_)) => {
             Err(ExcType::not_implemented("external function calls not supported by standard execution.").into())

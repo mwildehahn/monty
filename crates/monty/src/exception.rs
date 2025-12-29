@@ -831,11 +831,7 @@ impl RunError {
     pub fn into_python_exception(self, interns: &Interns, source: &str) -> PythonException {
         match self {
             Self::Exc(exc) | Self::UncatchableExc(exc) => exc.into_python_exception(interns, source),
-            Self::Internal(err) => PythonException {
-                exc_type: ExcType::RuntimeError,
-                message: Some(format!("Internal error in monty: {err}")),
-                traceback: vec![],
-            },
+            Self::Internal(err) => PythonException::runtime_error(format!("Internal error in monty: {err}")),
         }
     }
 

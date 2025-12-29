@@ -78,6 +78,14 @@ fn frames_are_identical(a: &StackFrame, b: &StackFrame) -> bool {
 impl std::error::Error for PythonException {}
 
 impl PythonException {
+    pub fn runtime_error(err: impl fmt::Display) -> Self {
+        Self {
+            exc_type: ExcType::RuntimeError,
+            message: Some(err.to_string()),
+            traceback: vec![],
+        }
+    }
+
     /// Returns a compact summary of the exception.
     ///
     /// Format: `ExceptionType: message` (e.g., `NotImplementedError: feature not supported`)
