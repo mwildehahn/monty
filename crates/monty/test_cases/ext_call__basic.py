@@ -63,3 +63,37 @@ assert length == 10, 'len of concat result'
 items = [add_ints(1, 2), add_ints(3, 4)]
 assert items[0] == 3, 'ext call in list literal first'
 assert items[1] == 7, 'ext call in list literal second'
+
+# === Multiple external calls in single expression ===
+
+# Two ext calls added together
+sum_result = add_ints(1, 2) + add_ints(3, 4)
+assert sum_result == 10, 'two ext calls in addition'
+
+# Three ext calls in one expression
+triple = add_ints(1, 1) + add_ints(2, 2) + add_ints(3, 3)
+assert triple == 12, 'three ext calls in expression'
+
+# Ext calls in multiplication
+mul_result = add_ints(2, 3) * add_ints(1, 1)
+assert mul_result == 10, 'ext calls in multiplication'
+
+# Ext calls in subtraction
+sub_result = add_ints(10, 5) - add_ints(3, 2)
+assert sub_result == 10, 'ext calls in subtraction'
+
+# Complex expression with multiple ext calls
+complex_expr = (add_ints(1, 2) + add_ints(3, 4)) * add_ints(0, 2)
+assert complex_expr == 20, 'complex expr with ext calls'
+
+# String concatenation with multiple ext calls
+str_result = concat_strings(return_value('a'), return_value('b')) + concat_strings('c', 'd')
+assert str_result == 'abcd', 'multiple ext calls for string concat'
+
+# Comparison with multiple ext calls
+cmp_result = add_ints(5, 5) == add_ints(3, 7)
+assert cmp_result == True, 'comparison of two ext call results'
+
+# Nested ext calls in expression
+nested_expr = add_ints(add_ints(1, 2), add_ints(3, 4))
+assert nested_expr == 10, 'nested ext calls in expression'

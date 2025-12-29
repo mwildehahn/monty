@@ -120,16 +120,11 @@ impl List {
                 Ok(Value::Ref(heap_id))
             }
             Some(v) => {
-                if let Some(iter) = ForIterator::new(&v, heap, interns) {
-                    let items = iter.collect(heap, interns)?;
-                    v.drop_with_heap(heap);
-                    let heap_id = heap.allocate(HeapData::List(List::new(items)))?;
-                    Ok(Value::Ref(heap_id))
-                } else {
-                    let err = ExcType::type_error_not_iterable(v.py_type(Some(heap)));
-                    v.drop_with_heap(heap);
-                    Err(err)
-                }
+                let mut iter = ForIterator::new(v, heap, interns)?;
+                let items = iter.collect(heap, interns)?;
+                iter.drop_with_heap(heap);
+                let heap_id = heap.allocate(HeapData::List(List::new(items)))?;
+                Ok(Value::Ref(heap_id))
             }
         }
     }

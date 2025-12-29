@@ -52,6 +52,10 @@ test: ## Run tests with ref-count-panic enabled
 test-ref-count-return: ## Run tests with ref-count-return enabled
 	cargo test --workspace --features ref-count-return
 
+.PHONY: test-cases
+test-cases: ## Run tests cases only
+	cargo test -p monty --test datatest_runner
+
 .PHONY: complete-tests
 complete-tests: ## Fill in incomplete test expectations using CPython
 	uv run scripts/complete_tests.py

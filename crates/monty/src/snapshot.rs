@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::{evaluate::ExternalCall, value::Value};
+use crate::{evaluate::ExternalCall, for_iterator::ForIterator, value::Value};
 
 /// Result of executing a frame - return, yield, or external function call.
 ///
@@ -53,16 +53,22 @@ impl AbstractSnapshotTracker for NoSnapshotTracker {
 
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotTracker {
-    pub stack: Vec<CodePosition>,
+    /// stack of positions, note this is reversed (last value is the outermost position)
+    /// as we push the outermost position last and pop it first
+    stack: Vec<CodePosition>,
     clause_state: Option<ClauseState>,
 }
 
-impl From<Vec<CodePosition>> for SnapshotTracker {
-    fn from(stack: Vec<CodePosition>) -> Self {
+impl SnapshotTracker {
+    pub fn new(stack: Vec<CodePosition>) -> Self {
         SnapshotTracker {
             stack,
-            ..Default::default()
+            clause_state: None,
         }
+    }
+
+    pub fn into_stack(self) -> Vec<CodePosition> {
+        self.stack
     }
 }
 
@@ -88,20 +94,24 @@ impl AbstractSnapshotTracker for SnapshotTracker {
 }
 
 /// Represents a position within nested control flow for snapshotting and code resumption.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CodePosition {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodePosition {
     /// Index of the next node to execute within the node array
     pub index: usize,
     /// indicates how to resume within the nested control flow if relevant
     pub clause_state: Option<ClauseState>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum ClauseState {
+/// State for resuming execution within control flow structures.
+///
+/// When execution suspends inside a control flow structure (if/for), this records
+/// which branch was taken so we can skip re-evaluating the condition on resume.
+#[derive(Debug, Clone)]
+pub(crate) enum ClauseState {
     /// When resuming within the if statement,
     /// whether the condition was met - true to resume the if branch and false to resume the else branch
     If(bool),
-    /// When resuming within a for loop,
-    /// the index of the next element to iterate over
-    For(usize),
+    /// When resuming within a for loop, `ForIterator` holds the value and the index of the next element
+    /// for iteration.
+    For(ForIterator),
 }

@@ -79,10 +79,15 @@ impl IntoIterator for Namespace {
 pub struct Namespaces {
     stack: Vec<Namespace>,
     /// Return values from an external function call.
-    /// Set when pausing during a return statement, used when resuming.
-    return_values: Vec<Value>,
+    /// Set when resuming after an external function call.
+    ext_return_values: Vec<Value>,
     /// Index of the next return value to be used.
-    next_return_value: usize,
+    ///
+    /// Since we can have multiple external function calls within a single statement (e.g. `foo() + bar()`),
+    /// we need to keep track of which functions we've already called to continue execution.
+    ///
+    /// This is somewhat similar to temporal style durable execution, but just within a single statement.
+    next_ext_return_value: usize,
 }
 
 impl Namespaces {
@@ -92,27 +97,27 @@ impl Namespaces {
     pub fn new(namespace: Vec<Value>) -> Self {
         Self {
             stack: vec![Namespace(namespace)],
-            return_values: vec![],
-            next_return_value: 0,
+            ext_return_values: vec![],
+            next_ext_return_value: 0,
         }
     }
 
-    /// Push another external return value from external function call.
+    /// Push another return value from an external function call.
     ///
     /// Also resets the return pointer to zero so we start getting values from the beginning.
     /// Since this is used when resuming after an external function call to return the value.
-    pub fn push_return_value(&mut self, return_value: Value) {
-        self.next_return_value = 0;
-        self.return_values.push(return_value);
+    pub fn push_ext_return_value(&mut self, return_value: Value) {
+        self.next_ext_return_value = 0;
+        self.ext_return_values.push(return_value);
     }
 
-    /// Takes the a return value, and increments the pointer so the next call will take the next value.
+    /// Takes a return value, and increments the pointer so the next call will take the next value.
     ///
     /// Returns `Some(Value)` if `next_return_value` points to a value, `None` otherwise.
     /// Used when resuming after an external function call to return the value.
-    pub fn take_return_value(&mut self, heap: &mut Heap<impl ResourceTracker>) -> Option<Value> {
-        if let Some(value) = self.return_values.get(self.next_return_value) {
-            self.next_return_value += 1;
+    pub fn take_ext_return_value(&mut self, heap: &mut Heap<impl ResourceTracker>) -> Option<Value> {
+        if let Some(value) = self.ext_return_values.get(self.next_ext_return_value) {
+            self.next_ext_return_value += 1;
             Some(value.clone_with_heap(heap))
         } else {
             None
@@ -121,23 +126,23 @@ impl Namespaces {
 
     /// Clears the return values and resets the pointer.
     ///
-    /// This should be used between expressions to return values are only used in the current expression.
+    /// This should be used between expressions so return values are only used in the current expression.
     #[cfg(not(feature = "ref-count-panic"))]
-    pub fn clear_return_values(&mut self, _heap: &mut Heap<impl ResourceTracker>) {
-        self.return_values.clear();
-        self.next_return_value = 0;
+    pub fn clear_ext_return_values(&mut self, _heap: &mut Heap<impl ResourceTracker>) {
+        self.ext_return_values.clear();
+        self.next_ext_return_value = 0;
     }
 
     /// if `ref-count-panic` is enabled, drop reach member of self.return_values properly before clearing to avoid panic
     /// on drop.
     #[cfg(feature = "ref-count-panic")]
-    pub fn clear_return_values(&mut self, heap: &mut Heap<impl ResourceTracker>) {
-        for value in &mut self.return_values {
+    pub fn clear_ext_return_values(&mut self, heap: &mut Heap<impl ResourceTracker>) {
+        for value in &mut self.ext_return_values {
             let v = std::mem::replace(value, Value::Dereferenced);
             v.drop_with_heap(heap);
         }
-        self.return_values.clear();
-        self.next_return_value = 0;
+        self.ext_return_values.clear();
+        self.next_ext_return_value = 0;
     }
 
     /// Gets an immutable slice reference to a namespace by index.
@@ -229,7 +234,7 @@ impl Namespaces {
             v.drop_with_heap(heap);
         }
         // Clean up any remaining return values from external function calls
-        for value in std::mem::take(&mut self.return_values) {
+        for value in std::mem::take(&mut self.ext_return_values) {
             value.drop_with_heap(heap);
         }
     }

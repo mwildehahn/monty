@@ -241,6 +241,7 @@ impl<T: ResourceTracker> Snapshot<T> {
         // Clone data needed for error handling before consuming self.executor
         // This is necessary because run_from_position consumes the executor,
         // but we need interns and source to convert errors to PythonException
+        // TODO fix
         let interns = self.executor.interns.clone();
         let source = self.executor.code.clone();
 
@@ -249,12 +250,13 @@ impl<T: ResourceTracker> Snapshot<T> {
             .to_value(&mut self.heap, &self.executor.interns)
             .map_err(|_| RunError::internal("invalid return value type").into_python_exception(&interns, &source))?;
 
-        self.namespaces.push_return_value(value);
+        self.namespaces.push_ext_return_value(value);
 
         // Continue execution from saved position
+        let snapshot_tracker = SnapshotTracker::new(self.position_stack);
         // Note: run_from_position consumes self.executor, but may return it in RunProgress::FunctionCall
         self.executor
-            .run_from_position(self.heap, self.namespaces, self.position_stack.into(), print)
+            .run_from_position(self.heap, self.namespaces, snapshot_tracker, print)
             .map_err(|e| e.into_python_exception(&interns, &source))
     }
 }
@@ -558,7 +560,7 @@ impl Executor {
                         executor: self,
                         heap,
                         namespaces,
-                        position_stack: snapshot_tracker.stack,
+                        position_stack: snapshot_tracker.into_stack(),
                     },
                 })
             }

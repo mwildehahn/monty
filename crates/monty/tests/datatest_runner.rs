@@ -34,7 +34,7 @@ struct TestConfig {
     xfail_monty: bool,
     /// When true, test is expected to fail on CPython (strict xfail).
     xfail_cpython: bool,
-    /// When true, use ExecutorIter with external function support instead of Executor.
+    /// When true, use RunSnapshot with external function support instead of Executor.
     iter_mode: bool,
 }
 
@@ -251,6 +251,7 @@ const ITER_EXT_FUNCTIONS: &[&str] = &[
     "add_ints",       // (a, b) -> a + b (integers)
     "concat_strings", // (a, b) -> a + b (strings)
     "return_value",   // (x) -> x (identity)
+    "get_list",       // () -> [1, 2, 3]
 ];
 
 /// Dispatches an external function call to the appropriate test implementation.
@@ -274,6 +275,10 @@ fn dispatch_external_call(name: &str, args: Vec<PyObject>) -> PyObject {
         "return_value" => {
             assert!(args.len() == 1, "return_value requires 1 argument");
             args.into_iter().next().unwrap()
+        }
+        "get_list" => {
+            assert!(args.is_empty(), "get_list requires no arguments");
+            PyObject::List(vec![PyObject::Int(1), PyObject::Int(2), PyObject::Int(3)])
         }
         _ => panic!("Unknown external function: {name}"),
     }
@@ -481,7 +486,7 @@ fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<()
     Ok(())
 }
 
-/// Try to run a test using ExecutorIter with external function support.
+/// Try to run a test using RunSnapshot with external function support.
 ///
 /// This function handles tests marked with `# mode: iter` directive by using the
 /// iterative executor API and providing implementations for predefined external functions.

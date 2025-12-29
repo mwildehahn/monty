@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo:*)",
+      "Bash(timeout 30s cargo:*)",
+      "Bash(timeout 10s cargo:*)",
+      "Bash(timeout 15s cargo:*)",
       "Bash(RUST_BACKTRACE=1 cargo:*)",
       "Bash(make:*)",
       "Bash(mkdir:*)",

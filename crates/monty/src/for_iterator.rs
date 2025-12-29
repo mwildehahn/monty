@@ -15,7 +15,7 @@ use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::{BytesId, Interns};
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
-use crate::types::{Range, Str};
+use crate::types::{PyTrait, Range, Str};
 use crate::value::Value;
 
 /// Iterator state for Python for loops.
@@ -23,48 +23,25 @@ use crate::value::Value;
 /// Contains the current iteration index and the type-specific iteration data.
 /// Uses index-based iteration to avoid borrow conflicts when accessing the heap.
 ///
-/// For strings, stores a copy with byte offset for efficient UTF-8 iteration.
+/// For strings, stores the string content with a byte offset for O(1) UTF-8 iteration.
+#[derive(Debug)]
 pub struct ForIterator {
     /// Current iteration index, shared across all iterator types.
     index: usize,
     /// Type-specific iteration data.
     iter_value: ForIterValue,
+    /// the actual Value being iterated over.
+    value: Value,
 }
 
-/// Type-specific iteration data for different Python iterable types.
-///
-/// Each variant stores the data needed to iterate over a specific type,
-/// excluding the index which is stored in the parent `ForIterator` struct.
-enum ForIterValue {
-    /// Iterating over a Range, yields `Value::Int`.
-    Range { start: i64, step: i64, len: usize },
-    /// Iterating over a heap-allocated List, yields cloned items.
-    /// Unlike dict, list mutation during iteration is allowed in Python - the iterator
-    /// checks the current list length on each iteration (not a captured snapshot).
-    List { heap_id: HeapId },
-    /// Iterating over a heap-allocated Tuple, yields cloned items.
-    /// Tuples are immutable so we capture the length at construction.
-    Tuple { heap_id: HeapId, len: usize },
-    /// Iterating over a heap-allocated Dict, yields cloned keys.
-    /// Checks `len` against current dict size to detect mutation (raises RuntimeError).
-    DictKeys { heap_id: HeapId, len: usize },
-    /// Iterating over a string (heap or interned), yields single-char Str values.
-    /// Stores a copy of the string with byte offset for efficient UTF-8 iteration.
-    IterStr {
-        string: String,
-        byte_offset: usize,
-        len: usize,
-    },
-    /// Iterating over a heap-allocated Bytes, yields `Value::Int` for each byte.
-    HeapBytes { heap_id: HeapId, len: usize },
-    /// Iterating over interned bytes, yields `Value::Int` for each byte.
-    InternBytes { bytes_id: BytesId, len: usize },
-    /// Iterating over a heap-allocated Set, yields cloned values.
-    /// Checks `len` against current set size to detect mutation (raises RuntimeError).
-    Set { heap_id: HeapId, len: usize },
-    /// Iterating over a heap-allocated FrozenSet, yields cloned values.
-    /// FrozenSets are immutable so we capture the length at construction.
-    FrozenSet { heap_id: HeapId, len: usize },
+impl Clone for ForIterator {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index,
+            iter_value: self.iter_value.clone(),
+            value: self.value.clone_immediate(),
+        }
+    }
 }
 
 impl ForIterator {
@@ -72,22 +49,31 @@ impl ForIterator {
     ///
     /// Returns `None` if the value is not iterable.
     /// For strings, copies the string content for byte-offset based iteration.
-    pub fn new(value: &Value, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<Self> {
-        let iter_value = match value {
-            Value::Range(range) => Some(ForIterValue::from_range(range)),
-            Value::InternString(string_id) => Some(ForIterValue::from_str(interns.get_str(*string_id))),
-            Value::InternBytes(bytes_id) => Some(ForIterValue::from_intern_bytes(*bytes_id, interns)),
-            Value::Ref(heap_id) => ForIterValue::from_heap_data(*heap_id, heap),
-            _ => None,
-        }?;
-        Some(Self { index: 0, iter_value })
+    pub fn new(value: Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Self> {
+        if let Some(iter_value) = ForIterValue::new(&value, heap, interns) {
+            Ok(Self {
+                index: 0,
+                iter_value,
+                value,
+            })
+        } else {
+            let err = ExcType::type_error_not_iterable(value.py_type(Some(heap)));
+            value.drop_with_heap(heap);
+            Err(err)
+        }
+    }
+
+    pub fn drop_with_heap(self, heap: &mut Heap<impl ResourceTracker>) {
+        self.value.drop_with_heap(heap);
     }
 
     /// Returns the next item from the iterator, advancing the internal index.
     ///
     /// Returns `Ok(None)` when the iterator is exhausted.
     /// Returns `Err` if allocation fails (for string character iteration) or if
-    /// a dict changes size during iteration (RuntimeError).
+    /// a dict/set changes size during iteration (RuntimeError).
+    ///
+    /// Use `decr()` to revert one step back (e.g., when snapshotting mid-iteration).
     pub fn for_next(&mut self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Option<Value>> {
         match &mut self.iter_value {
             ForIterValue::Range { start, step, len } => {
@@ -228,31 +214,35 @@ impl ForIterator {
         }
     }
 
-    /// Skips n items by advancing the internal index.
+    /// Decrements the iterator position by one step.
     ///
-    /// Used for resuming iteration from a saved position after yield/external call.
-    /// For strings, also advances the byte offset by iterating through skipped chars.
-    pub fn skip(&mut self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        // For strings, advance byte_offset through the skipped characters
+    /// Used when snapshotting mid-iteration: after `for_next()` returns a value and advances,
+    /// call `decr()` before saving the iterator to `ClauseState::For`. On resume, `for_next()`
+    /// will return the same value again.
+    ///
+    /// For strings, this scans backwards through the UTF-8 to find the previous character
+    /// boundary. This is O(1) amortized since UTF-8 characters are at most 4 bytes.
+    ///
+    /// # Panics
+    /// Panics if called when `index == 0` (cannot decrement below zero).
+    pub fn decr(&mut self) {
+        debug_assert!(self.index > 0, "cannot decrement iterator below zero");
+        self.index -= 1;
+
+        // For strings, move byte_offset back to the previous character's start
         if let ForIterValue::IterStr {
             string, byte_offset, ..
         } = &mut self.iter_value
         {
-            for c in string[*byte_offset..].chars().take(n) {
-                *byte_offset += c.len_utf8();
-            }
+            // Find the previous character by scanning backwards.
+            // UTF-8 continuation bytes have the form 10xxxxxx (0x80-0xBF).
+            // Start bytes have other forms, so we scan back until we find one.
+            let prev_char = string[..*byte_offset]
+                .chars()
+                .last()
+                .expect("byte_offset > 0 implies previous char exists");
+            *byte_offset -= prev_char.len_utf8();
         }
-        self.index += n;
-    }
-
-    /// Returns the current iteration index.
-    ///
-    /// Used for saving position to `ClauseState::For` for resumption.
-    pub fn index(&self) -> usize {
-        self.index
     }
 
     /// Returns the remaining size for iterables based on current state.
@@ -286,7 +276,7 @@ impl ForIterator {
     /// and similar constructors that need to materialize all items.
     ///
     /// Pre-allocates capacity based on `size_hint()` for better performance.
-    pub fn collect(mut self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Vec<Value>> {
+    pub fn collect(&mut self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Vec<Value>> {
         let mut items = Vec::with_capacity(self.size_hint(heap));
         while let Some(item) = self.for_next(heap, interns)? {
             items.push(item);
@@ -307,7 +297,61 @@ fn clone_and_inc_ref(value: Value, heap: &mut Heap<impl ResourceTracker>) -> Val
     value
 }
 
+/// Type-specific iteration data for different Python iterable types.
+///
+/// Each variant stores the data needed to iterate over a specific type,
+/// excluding the index which is stored in the parent `ForIterator` struct.
+#[derive(Debug, Clone)]
+enum ForIterValue {
+    /// Iterating over a Range, yields `Value::Int`.
+    Range { start: i64, step: i64, len: usize },
+    /// Iterating over a heap-allocated List, yields cloned items.
+    /// Unlike dict, list mutation during iteration is allowed in Python - the iterator
+    /// checks the current list length on each iteration (not a captured snapshot).
+    List { heap_id: HeapId },
+    /// Iterating over a heap-allocated Tuple, yields cloned items.
+    /// Tuples are immutable so we capture the length at construction.
+    Tuple { heap_id: HeapId, len: usize },
+    /// Iterating over a heap-allocated Dict, yields cloned keys.
+    /// Checks `len` against current dict size to detect mutation (raises RuntimeError).
+    DictKeys { heap_id: HeapId, len: usize },
+    /// Iterating over a string (heap or interned), yields single-char Str values.
+    ///
+    /// Stores a copy of the string content plus a byte offset for O(1) UTF-8 character access.
+    /// We store the string rather than referencing the heap because `for_next()` needs mutable
+    /// heap access to allocate the returned character strings, which would conflict with
+    /// borrowing the source string from the heap.
+    IterStr {
+        /// Copy of the string content for iteration.
+        string: String,
+        /// Current byte offset into the string (points to next char to yield).
+        byte_offset: usize,
+        /// Total number of characters in the string.
+        len: usize,
+    },
+    /// Iterating over a heap-allocated Bytes, yields `Value::Int` for each byte.
+    HeapBytes { heap_id: HeapId, len: usize },
+    /// Iterating over interned bytes, yields `Value::Int` for each byte.
+    InternBytes { bytes_id: BytesId, len: usize },
+    /// Iterating over a heap-allocated Set, yields cloned values.
+    /// Checks `len` against current set size to detect mutation (raises RuntimeError).
+    Set { heap_id: HeapId, len: usize },
+    /// Iterating over a heap-allocated FrozenSet, yields cloned values.
+    /// FrozenSets are immutable so we capture the length at construction.
+    FrozenSet { heap_id: HeapId, len: usize },
+}
+
 impl ForIterValue {
+    fn new(value: &Value, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<Self> {
+        match &value {
+            Value::Range(range) => Some(Self::from_range(range)),
+            Value::InternString(string_id) => Some(Self::from_str(interns.get_str(*string_id))),
+            Value::InternBytes(bytes_id) => Some(Self::from_intern_bytes(*bytes_id, interns)),
+            Value::Ref(heap_id) => Self::from_heap_data(*heap_id, heap),
+            _ => None,
+        }
+    }
+
     /// Creates a Range iterator value.
     fn from_range(range: &Range) -> Self {
         Self::Range {
@@ -318,7 +362,8 @@ impl ForIterValue {
     }
 
     /// Creates an iterator value over a string.
-    /// Copies the string and counts characters for the length field.
+    ///
+    /// Copies the string content and counts characters for the length field.
     fn from_str(s: &str) -> Self {
         Self::IterStr {
             string: s.to_owned(),

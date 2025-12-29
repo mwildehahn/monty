@@ -1,7 +1,7 @@
 use crate::args::ArgValues;
 use crate::evaluate::{EvalResult, EvaluateExpr};
 use crate::exception::{exc_err_static, exc_fmt, ExcType, RawStackFrame, RunError, SimpleException};
-use crate::expressions::{Expr, ExprLoc, Identifier, Literal, NameScope, Node};
+use crate::expressions::{ExprLoc, Identifier, NameScope, Node};
 use crate::for_iterator::ForIterator;
 use crate::heap::{Heap, HeapData};
 use crate::intern::{FunctionId, Interns, StringId, MODULE_STRING_ID};
@@ -137,7 +137,7 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
 
             // if enabled, clear return values after executing each node
             if P::clear_return_values() {
-                namespaces.clear_return_values(heap);
+                namespaces.clear_ext_return_values(heap);
             }
         }
         Ok(None)
@@ -223,23 +223,12 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
                 body,
                 or_else,
             } => {
-                let start_index = match clause_state {
-                    Some(ClauseState::For(resume_index)) => resume_index,
-                    _ => 0,
-                };
-                if let Some(exit_frame) = self.for_(namespaces, heap, target, iter, body, or_else, start_index)? {
+                if let Some(exit_frame) = self.for_(namespaces, heap, clause_state, target, iter, body, or_else)? {
                     return Ok(Some(exit_frame));
                 }
             }
             Node::If { test, body, or_else } => {
-                let if_test = match clause_state {
-                    Some(ClauseState::If(resume_test)) => &ExprLoc {
-                        position: CodeRange::default(),
-                        expr: Expr::Literal(Literal::Bool(resume_test)),
-                    },
-                    _ => test,
-                };
-                if let Some(exit_frame) = self.if_(namespaces, heap, if_test, body, or_else)? {
+                if let Some(exit_frame) = self.if_(namespaces, heap, clause_state, test, body, or_else)? {
                     return Ok(Some(exit_frame));
                 }
             }
@@ -584,32 +573,36 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
         &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<impl ResourceTracker>,
+        clause_state: Option<ClauseState>,
         target: &Identifier,
         iter: &ExprLoc,
         body: &[Node],
         _or_else: &[Node],
-        start_index: usize,
     ) -> RunResult<Option<FrameExit>> {
-        let iter_value = frame_ext_call!(self.execute_expr(namespaces, heap, iter)?);
+        // Get the iterator from the snapshot state if it
+        let mut for_iter = if let Some(ClauseState::For(for_iter)) = clause_state {
+            for_iter
+        } else {
+            let iter_value = frame_ext_call!(self.execute_expr(namespaces, heap, iter)?);
+            // Create ForIterator from value
+            let for_iter = ForIterator::new(iter_value, heap, self.interns)?;
 
-        // Create ForIterator from value, returns None for non-iterables
-        let Some(mut for_iter) = ForIterator::new(&iter_value, heap, self.interns) else {
-            let err = ExcType::type_error_not_iterable(iter_value.py_type(Some(heap)));
-            iter_value.drop_with_heap(heap);
-            return Err(err);
+            // Same as below, clear ext_return_values after evaluating the loop value but before entering the body.
+            // This ensures that when we resume with ClauseState::For (which skips re-evaluating
+            // the condition), there are no stale return values from the condition evaluation.
+            if P::clear_return_values() {
+                namespaces.clear_ext_return_values(heap);
+            }
+            for_iter
         };
-
-        // Skip to resume position (for resuming after yield/external call)
-        for_iter.skip(start_index);
 
         let namespace_id = target.namespace_id();
         loop {
-            let iter_index = for_iter.index();
             let value = match for_iter.for_next(heap, self.interns) {
                 Ok(Some(v)) => v,
                 Ok(None) => break, // Iteration complete
                 Err(e) => {
-                    iter_value.drop_with_heap(heap);
+                    for_iter.drop_with_heap(heap);
                     // Add frame info for errors from for_next (e.g., set/dict mutation during iteration)
                     return Err(e.set_frame(self.stack_frame(iter.position)));
                 }
@@ -622,38 +615,55 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
 
             match self.execute(namespaces, heap, body) {
                 Ok(Some(exit)) => {
-                    // Save current index for resumption (index taken before for_next)
-                    // On resume, we'll re-execute this iteration's body with position tracking
-                    // handling the internal resumption point within the body
-                    self.snapshot_tracker.set_clause_state(ClauseState::For(iter_index));
-                    iter_value.drop_with_heap(heap);
+                    // Decrement iterator so on resume for_next() returns the same value.
+                    // The loop variable is already set, but we need the iterator at the
+                    // correct position for potential re-iteration after the body completes.
+                    for_iter.decr();
+                    self.snapshot_tracker.set_clause_state(ClauseState::For(for_iter));
                     return Ok(Some(exit));
                 }
-                Ok(None) => {} // Continue loop
+                Ok(None) => {
+                    // for_next() already advanced, continue to next iteration
+                }
                 Err(e) => {
-                    iter_value.drop_with_heap(heap);
+                    for_iter.drop_with_heap(heap);
                     return Err(e);
                 }
             }
         }
 
         // Drop the original iterable value after loop completes
-        iter_value.drop_with_heap(heap);
+        for_iter.drop_with_heap(heap);
         Ok(None)
     }
 
     /// Executes an if statement.
     ///
     /// Evaluates the test condition and executes the appropriate branch.
+    /// Tracks return value consumption for proper resumption with external calls.
     fn if_(
         &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<impl ResourceTracker>,
+        clause_state: Option<ClauseState>,
         test: &ExprLoc,
         body: &[Node],
         or_else: &[Node],
     ) -> RunResult<Option<FrameExit>> {
-        if frame_ext_call!(self.execute_expr_bool(namespaces, heap, test)?) {
+        let is_true = if let Some(ClauseState::If(resume_test)) = clause_state {
+            resume_test
+        } else {
+            let test = frame_ext_call!(self.execute_expr_bool(namespaces, heap, test)?);
+            // Clear ext_return_values after evaluating the condition but before entering the body.
+            // This ensures that when we resume with ClauseState::If (which skips re-evaluating
+            // the condition), there are no stale return values from the condition evaluation.
+            // Only clear when actually evaluating a real condition (not using ClauseState::If).
+            if P::clear_return_values() {
+                namespaces.clear_ext_return_values(heap);
+            }
+            test
+        };
+        if is_true {
             if let Some(frame_exit) = self.execute(namespaces, heap, body)? {
                 self.snapshot_tracker.set_clause_state(ClauseState::If(true));
                 return Ok(Some(frame_exit));

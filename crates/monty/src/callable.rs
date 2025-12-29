@@ -51,12 +51,25 @@ impl Callable {
         match self {
             Callable::Builtin(b) => b.call(heap, args, interns, print).map(EvalResult::Value),
             Callable::Name(ident) => {
+                let mut args_opt = Some(args);
                 // Look up the callable in the namespace
-                let value = namespaces.get_var(local_idx, ident, interns)?;
+                let value = match namespaces.get_var(local_idx, ident, interns) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        if let Some(args) = args_opt.take() {
+                            args.drop_with_heap(heap);
+                        }
+                        return Err(err);
+                    }
+                };
 
                 match value {
-                    Value::Builtin(builtin) => return builtin.call(heap, args, interns, print).map(EvalResult::Value),
+                    Value::Builtin(builtin) => {
+                        let args = args_opt.take().expect("args moved twice");
+                        return builtin.call(heap, args, interns, print).map(EvalResult::Value);
+                    }
                     Value::Function(f_id) => {
+                        let args = args_opt.take().expect("args moved twice");
                         // Simple function without defaults - pass empty slice
                         return interns
                             .get_function(*f_id)
@@ -65,9 +78,15 @@ impl Callable {
                     }
                     Value::ExtFunction(f_id) => {
                         let f_id = *f_id;
-                        return if let Some(return_value) = namespaces.take_return_value(heap) {
+                        return if let Some(return_value) = namespaces.take_ext_return_value(heap) {
+                            if let Some(args) = args_opt.take() {
+                                args.drop_with_heap(heap);
+                            }
                             Ok(EvalResult::Value(return_value))
                         } else {
+                            let args = args_opt
+                                .take()
+                                .expect("external function args already taken before making call");
                             Ok(EvalResult::ExternalCall(ExternalCall::new(f_id, args)))
                         };
                     }
@@ -76,6 +95,7 @@ impl Callable {
                         let heap_id = *heap_id;
                         // Use with_entry_mut to temporarily take the HeapData out,
                         // allowing us to borrow heap mutably for the function call
+                        let args = args_opt.take().expect("args moved twice");
                         return heap
                             .with_entry_mut(heap_id, |heap, data| {
                                 match data {
@@ -88,6 +108,7 @@ impl Callable {
                                         f.call(namespaces, heap, args, defaults, interns, print)
                                     }
                                     _ => {
+                                        args.drop_with_heap(heap);
                                         // Not a callable heap type
                                         let type_name = data.py_type(Some(heap));
                                         let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");
@@ -98,6 +119,9 @@ impl Callable {
                             .map(EvalResult::Value);
                     }
                     _ => {}
+                }
+                if let Some(args) = args_opt.take() {
+                    args.drop_with_heap(heap);
                 }
                 let type_name = value.py_type(Some(heap));
                 let err = exc_fmt!(ExcType::TypeError; "'{type_name}' object is not callable");

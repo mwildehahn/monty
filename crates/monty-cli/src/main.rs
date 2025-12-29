@@ -3,7 +3,7 @@ use std::fs;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use monty::{RunProgress, RunSnapshot, StdPrint};
+use monty::{PyObject, RunProgress, RunSnapshot, StdPrint};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -17,7 +17,7 @@ fn main() -> ExitCode {
     };
     let input_names = vec![];
     let inputs = vec![];
-    let ext_functions = vec![];
+    let ext_functions = vec!["add_ints".to_owned()];
 
     let ex = match RunSnapshot::new(code, file_path, &input_names, ext_functions) {
         Ok(ex) => ex,
@@ -28,25 +28,59 @@ fn main() -> ExitCode {
     };
 
     let start = Instant::now();
-    match ex.run_no_limits(inputs, &mut StdPrint) {
-        Ok(RunProgress::Complete(value)) => {
-            let elapsed = start.elapsed();
-            eprintln!("success after: {elapsed:?}\n{value}");
-            ExitCode::SUCCESS
-        }
-        Ok(RunProgress::FunctionCall {
-            function_name, args, ..
-        }) => {
-            let elapsed = start.elapsed();
-            eprintln!(
-                "{elapsed:?}, external function call: {function_name}({args:?}) - no host to provide return value"
-            );
-            ExitCode::FAILURE
-        }
+    let mut progress = match ex.run_no_limits(inputs, &mut StdPrint) {
+        Ok(p) => p,
         Err(err) => {
             let elapsed = start.elapsed();
             eprintln!("error after: {elapsed:?}\n{err}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Handle external function calls in a loop
+    loop {
+        match progress {
+            RunProgress::Complete(value) => {
+                let elapsed = start.elapsed();
+                eprintln!("success after: {elapsed:?}\n{value}");
+                return ExitCode::SUCCESS;
+            }
+            RunProgress::FunctionCall {
+                function_name,
+                args,
+                state,
+                ..
+            } => {
+                let return_value = if function_name == "add_ints" {
+                    // Extract two integer arguments and add them
+                    if args.len() != 2 {
+                        eprintln!("add_ints requires exactly 2 arguments, got {}", args.len());
+                        return ExitCode::FAILURE;
+                    }
+                    if let (PyObject::Int(a), PyObject::Int(b)) = (&args[0], &args[1]) {
+                        let ret = PyObject::Int(a + b);
+                        eprintln!("Function call: {function_name}({args:?}) -> {ret:?}");
+                        ret
+                    } else {
+                        eprintln!("add_ints requires integer arguments, got {args:?}");
+                        return ExitCode::FAILURE;
+                    }
+                } else {
+                    let elapsed = start.elapsed();
+                    eprintln!("{elapsed:?}, unknown external function: {function_name}({args:?})");
+                    return ExitCode::FAILURE;
+                };
+
+                // Resume execution with the return value
+                match state.run(return_value, &mut StdPrint) {
+                    Ok(p) => progress = p,
+                    Err(err) => {
+                        let elapsed = start.elapsed();
+                        eprintln!("error after: {elapsed:?}\n{err}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
         }
     }
 }

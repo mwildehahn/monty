@@ -552,6 +552,7 @@ impl Set {
         while let Some(item) = iter.for_next(heap, interns)? {
             set.add(item, heap, interns)?;
         }
+        iter.drop_with_heap(heap);
         Ok(set)
     }
 
@@ -560,15 +561,9 @@ impl Set {
     /// This is a convenience method used by helper methods that need to convert
     /// arbitrary iterables to sets. It uses `ForIterator` internally.
     fn from_iterable(iterable: Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Self> {
-        if let Some(iter) = ForIterator::new(&iterable, heap, interns) {
-            let set = Self::from_iterator(iter, heap, interns)?;
-            iterable.drop_with_heap(heap);
-            Ok(set)
-        } else {
-            let err = ExcType::type_error_not_iterable(iterable.py_type(Some(heap)));
-            iterable.drop_with_heap(heap);
-            Err(err)
-        }
+        let iter = ForIterator::new(iterable, heap, interns)?;
+        let set = Self::from_iterator(iter, heap, interns)?;
+        Ok(set)
     }
 }
 
