@@ -9,7 +9,7 @@ use ahash::AHashSet;
 
 use crate::args::ArgValues;
 use crate::exception::ExcType;
-use crate::heap::{Heap, HeapId};
+use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
@@ -142,7 +142,8 @@ impl Range {
             v.drop_with_heap(heap);
         }
 
-        result.map(Value::Range)
+        // Allocate the range on the heap
+        Ok(Value::Ref(heap.allocate(HeapData::Range(result?))?))
     }
 }
 
@@ -248,7 +249,6 @@ impl PyTrait for Range {
     }
 
     fn py_estimate_size(&self) -> usize {
-        // Range is stored inline in Value, not heap-allocated
-        0
+        std::mem::size_of::<Range>()
     }
 }

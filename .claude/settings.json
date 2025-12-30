@@ -26,9 +26,13 @@
       "Bash(git mv:*)",
       "Bash(gh pr view:*)",
       "Bash(gh api:*)",
+      "Bash(gh run view:*)",
       "WebFetch(domain:docs.anthropic.com)",
       "Skill(python-playground)",
-      "Skill(fastmod)"
+      "Skill(fastmod)",
+      "Bash(wc:*)",
+      "Bash(rustup show:*)",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []

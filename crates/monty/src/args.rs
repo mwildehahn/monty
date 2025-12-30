@@ -268,15 +268,15 @@ pub struct Kwarg {
 #[derive(Debug, Clone)]
 pub enum ArgExprs {
     Empty,
-    One(Box<ExprLoc>),
-    Two(Box<ExprLoc>, Box<ExprLoc>),
+    One(ExprLoc),
+    Two(ExprLoc, ExprLoc),
     Args(Vec<ExprLoc>),
     Kwargs(Vec<Kwarg>),
     ArgsKargs {
         args: Option<Vec<ExprLoc>>,
-        var_args: Option<Box<ExprLoc>>,
+        var_args: Option<ExprLoc>,
         kwargs: Option<Vec<Kwarg>>,
-        var_kwargs: Option<Box<ExprLoc>>,
+        var_kwargs: Option<ExprLoc>,
     },
 }
 
@@ -295,9 +295,9 @@ impl ArgExprs {
         if var_args.is_some() || var_kwargs.is_some() || (!kwargs.is_empty() && !args.is_empty()) {
             Self::ArgsKargs {
                 args: if args.is_empty() { None } else { Some(args) },
-                var_args: var_args.map(Box::new),
+                var_args,
                 kwargs: if kwargs.is_empty() { None } else { Some(kwargs) },
-                var_kwargs: var_kwargs.map(Box::new),
+                var_kwargs,
             }
         } else if !kwargs.is_empty() {
             Self::Kwargs(kwargs)
@@ -307,9 +307,9 @@ impl ArgExprs {
             let mut iter = args.into_iter();
             if let Some(first) = iter.next() {
                 if let Some(second) = iter.next() {
-                    Self::Two(Box::new(first), Box::new(second))
+                    Self::Two(first, second)
                 } else {
-                    Self::One(Box::new(first))
+                    Self::One(first)
                 }
             } else {
                 Self::Empty
@@ -329,8 +329,8 @@ impl ArgExprs {
         let taken = std::mem::replace(self, Self::Empty);
         *self = match taken {
             Self::Empty => Self::Empty,
-            Self::One(arg) => Self::One(Box::new(f(*arg)?)),
-            Self::Two(arg1, arg2) => Self::Two(Box::new(f(*arg1)?), Box::new(f(*arg2)?)),
+            Self::One(arg) => Self::One(f(arg)?),
+            Self::Two(arg1, arg2) => Self::Two(f(arg1)?, f(arg2)?),
             Self::Args(args) => Self::Args(args.into_iter().map(&mut f).collect::<Result<Vec<_>, _>>()?),
             Self::Kwargs(kwargs) => Self::Kwargs(
                 kwargs
@@ -352,7 +352,7 @@ impl ArgExprs {
                 let args = args
                     .map(|a| a.into_iter().map(&mut f).collect::<Result<Vec<_>, ParseError>>())
                     .transpose()?;
-                let var_args = var_args.map(|e| f(*e).map(Box::new)).transpose()?;
+                let var_args = var_args.map(&mut f).transpose()?;
                 let kwargs = kwargs
                     .map(|k| {
                         k.into_iter()
@@ -365,7 +365,7 @@ impl ArgExprs {
                             .collect::<Result<Vec<_>, ParseError>>()
                     })
                     .transpose()?;
-                let var_kwargs = var_kwargs.map(|e| f(*e).map(Box::new)).transpose()?;
+                let var_kwargs = var_kwargs.map(&mut f).transpose()?;
                 Self::ArgsKargs {
                     args,
                     var_args,

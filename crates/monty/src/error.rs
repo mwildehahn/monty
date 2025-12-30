@@ -206,20 +206,23 @@ impl StackFrame {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct CodeLoc {
     /// Line number (1-based).
-    pub line: u32,
+    pub line: u16,
     /// Column number (1-based).
-    pub column: u32,
+    pub column: u16,
 }
 
 impl CodeLoc {
     /// Creates a new CodeLoc from usize values.
     ///
     /// Lines and columns numbers are 1-indexed for display, hence `+1`
+    ///
+    /// # Panics
+    /// Panics if the line or column number overflows `u16`.
     #[must_use]
     pub fn new(line: usize, column: usize) -> Self {
         Self {
-            line: line as u32 + 1,
-            column: column as u32 + 1,
+            line: u16::try_from(line).expect("Line number overflow") + 1,
+            column: u16::try_from(column).expect("Column number overflow") + 1,
         }
     }
 }

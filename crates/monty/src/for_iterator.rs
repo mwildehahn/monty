@@ -49,8 +49,17 @@ impl ForIterator {
     ///
     /// Returns `None` if the value is not iterable.
     /// For strings, copies the string content for byte-offset based iteration.
-    pub fn new(value: Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Self> {
+    /// For ranges, the data is copied so the heap reference is dropped immediately.
+    pub fn new(mut value: Value, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Self> {
         if let Some(iter_value) = ForIterValue::new(&value, heap, interns) {
+            // For Range, we copy start/step/len into ForIterValue::Range, so we don't need
+            // to keep the heap object alive during iteration. Drop it immediately to avoid
+            // GC issues (the Range isn't in any namespace slot, so GC wouldn't see it).
+            // Same for IterStr which copies the string content.
+            if matches!(iter_value, ForIterValue::Range { .. } | ForIterValue::IterStr { .. }) {
+                value.drop_with_heap(heap);
+                value = Value::None;
+            }
             Ok(Self {
                 index: 0,
                 iter_value,
@@ -344,7 +353,6 @@ enum ForIterValue {
 impl ForIterValue {
     fn new(value: &Value, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<Self> {
         match &value {
-            Value::Range(range) => Some(Self::from_range(range)),
             Value::InternString(string_id) => Some(Self::from_str(interns.get_str(*string_id))),
             Value::InternBytes(bytes_id) => Some(Self::from_intern_bytes(*bytes_id, interns)),
             Value::Ref(heap_id) => Self::from_heap_data(*heap_id, heap),
@@ -403,8 +411,12 @@ impl ForIterValue {
                 heap_id,
                 len: frozenset.len(),
             }),
-            // Closures, FunctionDefaults, and Cells are not iterable
-            HeapData::Closure(_, _, _) | HeapData::FunctionDefaults(_, _) | HeapData::Cell(_) => None,
+            HeapData::Range(range) => Some(Self::from_range(range)),
+            // Closures, FunctionDefaults, Cells, and Exceptions are not iterable
+            HeapData::Closure(_, _, _)
+            | HeapData::FunctionDefaults(_, _)
+            | HeapData::Cell(_)
+            | HeapData::Exception(_) => None,
         }
     }
 }

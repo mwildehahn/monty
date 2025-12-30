@@ -583,7 +583,13 @@ impl<'a> Parser<'a> {
                             let ident = self.identifier(id, range);
                             Callable::Name(ident)
                         };
-                        Ok(ExprLoc::new(position, Expr::Call { callable, args }))
+                        Ok(ExprLoc::new(
+                            position,
+                            Expr::Call {
+                                callable,
+                                args: Box::new(args),
+                            },
+                        ))
                     }
                     AstExpr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                         let object = self.parse_identifier(*value)?;
@@ -592,7 +598,7 @@ impl<'a> Parser<'a> {
                             Expr::AttrCall {
                                 object,
                                 attr: attr.id().to_string().into(),
-                                args,
+                                args: Box::new(args),
                             },
                         ))
                     }

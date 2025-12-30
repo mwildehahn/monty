@@ -10,7 +10,7 @@ use strum::Display;
 
 use crate::args::ArgValues;
 use crate::builtins::Builtins;
-use crate::exception::{exc_err_fmt, ExcType, SimpleException};
+use crate::exception::{exc_err_fmt, ExcType};
 
 use crate::heap::HeapData;
 use crate::heap::{Heap, HeapId};
@@ -19,7 +19,7 @@ use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
 use crate::types::bytes::bytes_repr_fmt;
 use crate::types::str::string_repr_fmt;
-use crate::types::{Dict, PyTrait, Range, Type};
+use crate::types::{Dict, PyTrait, Type};
 
 /// Primary value type representing Python objects at runtime.
 ///
@@ -30,6 +30,8 @@ use crate::types::{Dict, PyTrait, Range, Type};
 /// NOTE: `Clone` is intentionally NOT derived. Use `clone_with_heap()` for heap values
 /// or `clone_immediate()` for immediate values only. Direct cloning via `.clone()` would
 /// bypass reference counting and cause memory leaks.
+///
+/// NOTE: it's important to keep this size small to minimize memory overhead!
 #[derive(Debug)]
 pub enum Value {
     // Immediate values (stored inline, no heap allocation)
@@ -39,15 +41,12 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Range(Range),
     /// An interned string literal. The StringId references the string in the Interns table.
     /// To get the actual string content, use `interns.get(string_id)`.
     InternString(StringId),
     /// An interned bytes literal. The BytesId references the bytes in the Interns table.
     /// To get the actual bytes content, use `interns.get_bytes(bytes_id)`.
     InternBytes(BytesId),
-    /// Exception instance (e.g., result of `ValueError('msg')`).
-    Exc(SimpleException),
     /// A builtin function or exception type
     Builtin(Builtins),
     /// A function defined in the module (not a closure, doesn't capture any variables)
@@ -93,10 +92,8 @@ impl PyTrait for Value {
             Self::Bool(_) => Type::Bool,
             Self::Int(_) => Type::Int,
             Self::Float(_) => Type::Float,
-            Self::Range(_) => Type::Range,
             Self::InternString(_) => Type::Str,
             Self::InternBytes(_) => Type::Bytes,
-            Self::Exc(e) => e.py_type(),
             Self::Builtin(c) => c.py_type(),
             Self::Function(_) | Self::ExtFunction(_) => Type::Function,
             Self::Ref(id) => match heap {
@@ -122,7 +119,6 @@ impl PyTrait for Value {
             // Count Unicode characters, not bytes, to match Python semantics
             Self::InternString(string_id) => Some(interns.get_str(*string_id).chars().count()),
             Self::InternBytes(bytes_id) => Some(interns.get_bytes(*bytes_id).len()),
-            Self::Range(r) => r.py_len(heap, interns),
             Self::Ref(id) => heap.get(*id).py_len(heap, interns),
             _ => None,
         }
@@ -133,7 +129,6 @@ impl PyTrait for Value {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
             (Self::Int(v1), Self::Int(v2)) => v1 == v2,
-            (Self::Range(r1), Self::Range(r2)) => r1.py_eq(r2, heap, interns),
             (Self::Bool(v1), Self::Bool(v2)) => v1 == v2,
             (Self::Bool(v1), Self::Int(v2)) => i64::from(*v1) == *v2,
             (Self::Int(v1), Self::Bool(v2)) => *v1 == i64::from(*v2),
@@ -235,8 +230,6 @@ impl PyTrait for Value {
             Self::Bool(b) => *b,
             Self::Int(v) => *v != 0,
             Self::Float(f) => *f != 0.0,
-            Self::Range(r) => r.py_bool(heap, interns),
-            Self::Exc(_) => true,
             Self::Builtin(_) => true,                         // Builtins are always truthy
             Self::Function(_) | Self::ExtFunction(_) => true, // same
             Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
@@ -269,8 +262,6 @@ impl PyTrait for Value {
                     write!(f, "{s}.0")
                 }
             }
-            Self::Range(r) => r.py_repr_fmt(f, heap, heap_ids, interns),
-            Self::Exc(exc) => exc.py_repr_fmt(f),
             Self::Builtin(b) => b.py_repr_fmt(f),
             Self::Function(f_id) => interns.get_function(*f_id).py_repr_fmt(f, interns, 0),
             Self::ExtFunction(f_id) => {
@@ -831,7 +822,7 @@ impl Value {
     ///
     /// Should match Python's `id()` function conceptually.
     ///
-    /// For immediate values (Int, Float, Range, Exc, Builtins), this computes a deterministic ID
+    /// For immediate values (Int, Float, Builtins), this computes a deterministic ID
     /// based on the value's hash, avoiding heap allocation. This means `id(5) == id(5)` will
     /// return True (unlike CPython for large integers outside the interning range).
     ///
@@ -851,17 +842,14 @@ impl Value {
                     singleton_id(SingletonSlot::False)
                 }
             }
-            // Self::Function(f) | Self::Closure(f, _) => f.id(),
             // Interned strings/bytes use their index directly - the index is the stable identifier
             Self::InternString(string_id) => INTERN_STR_ID_TAG | (string_id.index() & INTERN_STR_ID_MASK),
             Self::InternBytes(bytes_id) => INTERN_BYTES_ID_TAG | (bytes_id.index() & INTERN_BYTES_ID_MASK),
-            // Already heap-allocated, return id within a dedicated tag range
+            // Already heap-allocated (includes Range and Exception), return id within a dedicated tag range
             Self::Ref(id) => heap_tagged_id(*id),
             // Value-based IDs for immediate types (no heap allocation!)
             Self::Int(v) => int_value_id(*v),
             Self::Float(v) => float_value_id(*v),
-            Self::Range(r) => range_value_id(r),
-            Self::Exc(e) => exc_value_id(e),
             Self::Builtin(c) => builtin_value_id(*c),
             Self::Function(f_id) => function_value_id(*f_id),
             Self::ExtFunction(f_id) => ext_function_value_id(*f_id),
@@ -902,7 +890,7 @@ impl Value {
                 interns.get_bytes(*bytes_id).hash(&mut hasher);
                 return Some(hasher.finish());
             }
-            // For heap-allocated values, compute hash lazily and cache it
+            // For heap-allocated values (includes Range and Exception), compute hash lazily and cache it
             Self::Ref(id) => return heap.get_or_compute_hash(*id, interns),
             _ => {}
         }
@@ -917,8 +905,6 @@ impl Value {
             Self::Int(i) => i.hash(&mut hasher),
             // Hash the bit representation of float for consistency
             Self::Float(f) => f.to_bits().hash(&mut hasher),
-            Self::Range(range) => range.hash(&mut hasher),
-            Self::Exc(e) => e.hash(&mut hasher),
             Self::Builtin(b) => b.hash(&mut hasher),
             // Hash functions based on function ID
             Self::Function(f_id) => f_id.hash(&mut hasher),
@@ -1041,8 +1027,6 @@ impl Value {
             Self::Bool(b) => Self::Bool(*b),
             Self::Int(v) => Self::Int(*v),
             Self::Float(v) => Self::Float(*v),
-            Self::Range(r) => Self::Range(*r),
-            Self::Exc(e) => Self::Exc(e.clone()),
             Self::Builtin(b) => Self::Builtin(*b),
             Self::Function(f) => Self::Function(*f),
             Self::ExtFunction(f) => Self::ExtFunction(*f),
@@ -1051,32 +1035,6 @@ impl Value {
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot copy Dereferenced object"),
-        }
-    }
-
-    #[cfg(feature = "ref-count-panic")]
-    pub fn into_exc(self) -> SimpleException {
-        if let Self::Exc(exc) = &self {
-            // SAFETY: We're reading the exc out and then forgetting the value shell.
-            // This is safe because:
-            // 1. exc is a valid reference to the SimpleException inside value
-            // 2. We immediately forget value, so Drop won't run and won't try to
-            //    access the now-moved exc
-            // 3. It's only used with the `dref-check` feature enabled for testing
-            let exc_owned = unsafe { std::ptr::read(exc) };
-            std::mem::forget(self);
-            exc_owned
-        } else {
-            panic!("Cannot convert non-exception value into exception")
-        }
-    }
-
-    #[cfg(not(feature = "ref-count-panic"))]
-    pub fn into_exc(self) -> SimpleException {
-        if let Self::Exc(e) = self {
-            e
-        } else {
-            panic!("Cannot convert non-exception value into exception")
         }
     }
 
@@ -1234,22 +1192,16 @@ const HEAP_ID_MASK: usize = HEAP_ID_TAG - 1;
 const INT_ID_TAG: usize = 1usize << (usize::BITS - 5);
 /// High-bit tag for Float value-based IDs.
 const FLOAT_ID_TAG: usize = 1usize << (usize::BITS - 6);
-/// High-bit tag for Range value-based IDs.
-const RANGE_ID_TAG: usize = 1usize << (usize::BITS - 7);
-/// High-bit tag for Exc (exception) value-based IDs.
-const EXC_ID_TAG: usize = 1usize << (usize::BITS - 8);
 /// High-bit tag for Callable value-based IDs.
-const BUILTIN_ID_TAG: usize = 1usize << (usize::BITS - 9);
+const BUILTIN_ID_TAG: usize = 1usize << (usize::BITS - 7);
 /// High-bit tag for Function value-based IDs.
-const FUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 10);
+const FUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 8);
 /// High-bit tag for External Function value-based IDs.
-const EXTFUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 11);
+const EXTFUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 9);
 
 /// Masks for value-based ID tags (keep bits below the tag bit).
 const INT_ID_MASK: usize = INT_ID_TAG - 1;
 const FLOAT_ID_MASK: usize = FLOAT_ID_TAG - 1;
-const RANGE_ID_MASK: usize = RANGE_ID_TAG - 1;
-const EXC_ID_MASK: usize = EXC_ID_TAG - 1;
 const BUILTIN_ID_MASK: usize = BUILTIN_ID_TAG - 1;
 const FUNCTION_ID_MASK: usize = FUNCTION_ID_TAG - 1;
 const EXTFUNCTION_ID_MASK: usize = EXTFUNCTION_ID_TAG - 1;
@@ -1293,23 +1245,6 @@ fn float_value_id(value: f64) -> usize {
     let mut hasher = DefaultHasher::new();
     value.to_bits().hash(&mut hasher);
     FLOAT_ID_TAG | (hasher.finish() as usize & FLOAT_ID_MASK)
-}
-
-/// Computes a deterministic ID for a Range value based on its start, stop, and step.
-#[inline]
-fn range_value_id(range: &Range) -> usize {
-    let mut hasher = DefaultHasher::new();
-    range.hash(&mut hasher);
-    RANGE_ID_TAG | (hasher.finish() as usize & RANGE_ID_MASK)
-}
-
-/// Computes a deterministic ID for an exception based on its hash.
-#[inline]
-fn exc_value_id(exc: &SimpleException) -> usize {
-    let mut hasher = DefaultHasher::new();
-    exc.hash(&mut hasher);
-    let hash = hasher.finish();
-    EXC_ID_TAG | (hash as usize & EXC_ID_MASK)
 }
 
 /// Computes a deterministic ID for a builtin based on its discriminant.

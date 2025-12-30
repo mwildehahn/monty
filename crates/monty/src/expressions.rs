@@ -95,12 +95,15 @@ pub enum Expr {
     /// that will be looked up in the namespace at runtime.
     Call {
         callable: Callable,
-        args: ArgExprs,
+        /// ArgExprs is relatively large and would require Box anyway since it uses ExprLoc, so keep Expr small
+        /// by using a box here
+        args: Box<ArgExprs>,
     },
     AttrCall {
         object: Identifier,
         attr: Attr,
-        args: ArgExprs,
+        /// same as above for Box
+        args: Box<ArgExprs>,
     },
     Op {
         left: Box<ExprLoc>,

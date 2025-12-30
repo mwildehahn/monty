@@ -589,9 +589,9 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                 var_kwargs,
             } => self.evaluate_full_args(
                 args.as_deref(),
-                var_args.as_deref(),
+                var_args.as_ref(),
                 kwargs.as_deref(),
-                var_kwargs.as_deref(),
+                var_kwargs.as_ref(),
                 callable.map(|c| c.name(self.interns)),
             ),
         }

@@ -283,7 +283,7 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
     /// Executes a raise statement.
     ///
     /// Handles:
-    /// * Exception instance (Value::Exc) - raise directly
+    /// * Exception instance (heap-allocated HeapData::Exception) - raise directly
     /// * Exception type (Value::Callable with ExcType) - instantiate then raise
     /// * Anything else - TypeError
     fn raise(
@@ -294,25 +294,28 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
     ) -> RunResult<Option<FrameExit>> {
         if let Some(exc_expr) = op_exc_expr {
             let value = frame_ext_call!(self.execute_expr(namespaces, heap, exc_expr)?);
-            match &value {
-                Value::Exc(_) => {
-                    // Match on the reference then use into_exc() due to issues with destructuring Value
-                    let exc = value.into_exc();
+            // Check if value is a heap-allocated exception
+            if let Value::Ref(id) = &value {
+                if let HeapData::Exception(exc) = heap.get(*id) {
+                    let exc = exc.clone();
+                    value.drop_with_heap(heap);
                     // Use raise_frame so traceback won't show caret for raise statement
                     return Err(exc.with_frame(self.raise_frame(exc_expr.position)).into());
                 }
-                Value::Builtin(builtin) => {
-                    // Callable is inline - call it to get the exception
-                    let builtin = *builtin;
-                    let result = builtin.call(heap, ArgValues::Empty, self.interns, self.print)?;
-                    if matches!(&result, Value::Exc(_)) {
-                        // No need to drop value - Callable is Copy and doesn't need cleanup
-                        let exc = result.into_exc();
+            }
+            if let Value::Builtin(builtin) = &value {
+                // Callable is inline - call it to get the exception
+                let builtin = *builtin;
+                let result = builtin.call(heap, ArgValues::Empty, self.interns, self.print)?;
+                // Check if result is a heap-allocated exception
+                if let Value::Ref(id) = &result {
+                    if let HeapData::Exception(exc) = heap.get(*id) {
+                        let exc = exc.clone();
+                        result.drop_with_heap(heap);
                         // Use raise_frame so traceback won't show caret for raise statement
                         return Err(exc.with_frame(self.raise_frame(exc_expr.position)).into());
                     }
                 }
-                _ => {}
             }
             value.drop_with_heap(heap);
             exc_err_static!(ExcType::TypeError; "exceptions must derive from BaseException")
@@ -1075,7 +1078,8 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
 
         // Bind exception to variable if specified
         if let Some(ref name) = handler.name {
-            let exc_value = Value::Exc(exc.exc.clone());
+            let heap_id = heap.allocate(HeapData::Exception(exc.exc.clone()))?;
+            let exc_value = Value::Ref(heap_id);
             let ns_idx = match name.scope {
                 NameScope::Global => GLOBAL_NS_IDX,
                 _ => self.local_idx,
@@ -1132,8 +1136,10 @@ impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
                 _ => self.local_idx,
             };
             let namespace = namespaces.get(ns_idx);
-            if let Value::Exc(exc) = namespace.get(name.namespace_id()) {
-                self.current_exception = Some(exc.clone());
+            if let Value::Ref(id) = namespace.get(name.namespace_id()) {
+                if let HeapData::Exception(exc) = heap.get(*id) {
+                    self.current_exception = Some(exc.clone());
+                }
             }
         }
 

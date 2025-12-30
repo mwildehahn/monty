@@ -98,24 +98,24 @@ impl ExcType {
     /// Currently supports zero or one string argument.
     ///
     /// The `interns` parameter provides access to interned string content.
+    /// Returns a heap-allocated exception value.
     pub(crate) fn call(
         self,
         heap: &mut Heap<impl ResourceTracker>,
         args: ArgValues,
         interns: &Interns,
     ) -> RunResult<Value> {
-        match args {
-            ArgValues::Empty => Ok(Value::Exc(SimpleException::new(self, None))),
+        let exc = match args {
+            ArgValues::Empty => Ok(SimpleException::new(self, None)),
             ArgValues::One(value) => {
                 // Borrow the value to inspect its type, then clean up with drop_with_heap
                 let result = match &value {
-                    Value::InternString(string_id) => Ok(Value::Exc(SimpleException::new(
-                        self,
-                        Some(interns.get_str(*string_id).to_owned()),
-                    ))),
+                    Value::InternString(string_id) => {
+                        Ok(SimpleException::new(self, Some(interns.get_str(*string_id).to_owned())))
+                    }
                     Value::Ref(heap_id) => {
                         if let HeapData::Str(s) = heap.get(*heap_id) {
-                            Ok(Value::Exc(SimpleException::new(self, Some(s.as_str().to_owned()))))
+                            Ok(SimpleException::new(self, Some(s.as_str().to_owned())))
                         } else {
                             Err(RunError::internal(
                                 "exceptions can only be called with zero or one string argument",
@@ -137,7 +137,9 @@ impl ExcType {
                     "exceptions can only be called with zero or one string argument",
                 ))
             }
-        }
+        }?;
+        let heap_id = heap.allocate(HeapData::Exception(exc))?;
+        Ok(Value::Ref(heap_id))
     }
 
     #[must_use]

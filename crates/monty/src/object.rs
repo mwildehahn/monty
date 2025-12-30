@@ -209,7 +209,7 @@ impl PyObject {
             }
             Self::Exception { exc_type, arg } => {
                 let exc = SimpleException::new(exc_type, arg);
-                Ok(Value::Exc(exc))
+                Ok(Value::Ref(heap.allocate(HeapData::Exception(exc))?))
             }
             Self::Repr(_) => Err(InvalidInputError::invalid_type("Repr")),
             Self::Cycle(_, _) => Err(InvalidInputError::invalid_type("Cycle")),
@@ -242,10 +242,6 @@ impl PyObject {
             Value::Float(f) => Self::Float(*f),
             Value::InternString(string_id) => Self::String(interns.get_str(*string_id).to_owned()),
             Value::InternBytes(bytes_id) => Self::Bytes(interns.get_bytes(*bytes_id).to_owned()),
-            Value::Exc(exc) => Self::Exception {
-                exc_type: exc.exc_type(),
-                arg: exc.arg().map(ToString::to_string),
-            },
             Value::Ref(id) => {
                 // Check for cycle
                 if visited.contains(id) {
@@ -308,6 +304,16 @@ impl PyObject {
                     HeapData::Closure(..) | HeapData::FunctionDefaults(..) => {
                         Self::Repr(object.py_repr(heap, interns).into_owned())
                     }
+                    HeapData::Range(range) => {
+                        // Represent Range as a repr string since PyObject doesn't have a Range variant
+                        let mut s = String::new();
+                        let _ = range.py_repr_fmt(&mut s, heap, visited, interns);
+                        Self::Repr(s)
+                    }
+                    HeapData::Exception(exc) => Self::Exception {
+                        exc_type: exc.exc_type(),
+                        arg: exc.arg().map(ToString::to_string),
+                    },
                 };
 
                 // Remove from visited set after processing

@@ -42,7 +42,8 @@ result
 ";
     let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
-    let limits = ResourceLimits::new().max_allocations(10);
+    // Allocations: list (1) + range (1) + str(0)...str(8) (9) = 11
+    let limits = ResourceLimits::new().max_allocations(11);
     let result = ex.run_with_limits(vec![], limits);
 
     // Should succeed

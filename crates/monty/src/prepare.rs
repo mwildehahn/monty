@@ -274,7 +274,7 @@ impl<'i> Prepare<'i> {
                                 Expr::Builtin(b) => {
                                     let call_expr = Expr::Call {
                                         callable: Callable::Builtin(b),
-                                        args: ArgExprs::Empty,
+                                        args: Box::new(ArgExprs::Empty),
                                     };
                                     Some(ExprLoc::new(expr.position, call_expr))
                                 }

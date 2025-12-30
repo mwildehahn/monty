@@ -20,10 +20,10 @@ dbg_macro = "warn"
 # in general we lint against the pedantic group, but we will whitelist
 # certain lints which we don't want to enforce (for now)
 pedantic = { level = "warn", priority = -1 }
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
+cast_possible_truncation = "allow"  # TODO remove and fix
+cast_possible_wrap = "allow"  # TODO remove and fix
+cast_sign_loss = "allow"  # TODO remove and fix
 cast_precision_loss = "allow"
-cast_sign_loss = "allow"
 doc_markdown = "allow"
 match_same_arms = "allow"
 missing_errors_doc = "allow"

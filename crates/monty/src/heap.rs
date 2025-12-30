@@ -2,15 +2,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::hash::{Hash, Hasher};
+use std::mem::discriminant;
 
 use ahash::AHashSet;
 
 use crate::args::ArgValues;
-use crate::exception::ExcType;
+use crate::exception::{ExcType, SimpleException};
 use crate::intern::{FunctionId, Interns};
 use crate::resource::{ResourceError, ResourceTracker};
 use crate::run_frame::RunResult;
-use crate::types::{Bytes, Dict, FrozenSet, List, PyTrait, Set, Str, Tuple, Type};
+use crate::types::{Bytes, Dict, FrozenSet, List, PyTrait, Range, Set, Str, Tuple, Type};
 use crate::value::{Attr, Value};
 
 /// Unique identifier for values stored inside the heap arena.
@@ -62,6 +63,16 @@ pub enum HeapData {
     /// Both the outer function and inner function hold references to the same
     /// cell, allowing modifications to propagate across scope boundaries.
     Cell(Value),
+    /// A range object (e.g., `range(10)` or `range(1, 10, 2)`).
+    ///
+    /// Stored on the heap to keep `Value` enum small (16 bytes). Range objects
+    /// are immutable and hashable.
+    Range(Range),
+    /// An exception instance (e.g., `ValueError('message')`).
+    ///
+    /// Stored on the heap to keep `Value` enum small (16 bytes). Exceptions
+    /// are created when exception types are called or when `raise` is executed.
+    Exception(SimpleException),
 }
 
 impl HeapData {
@@ -74,6 +85,8 @@ impl HeapData {
     /// avoiding unnecessary hash computation for values that are never used as keys.
     fn compute_hash_if_immutable(&self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> Option<u64> {
         match self {
+            // Hash just the actual string or bytes content for consistency with Value::InternString/InternBytes
+            // hence we don't include the discriminant
             Self::Str(s) => {
                 let mut hasher = DefaultHasher::new();
                 s.as_str().hash(&mut hasher);
@@ -84,29 +97,38 @@ impl HeapData {
                 b.as_slice().hash(&mut hasher);
                 Some(hasher.finish())
             }
-            Self::Tuple(t) => {
-                // Tuple is hashable only if all elements are hashable
-                let mut hasher = DefaultHasher::new();
-                for obj in t.as_vec() {
-                    match obj.py_hash(heap, interns) {
-                        Some(h) => h.hash(&mut hasher),
-                        None => return None, // Contains unhashable element
-                    }
-                }
-                Some(hasher.finish())
-            }
             Self::FrozenSet(fs) => {
                 // FrozenSet hash is XOR of element hashes (order-independent)
                 fs.compute_hash(heap, interns)
             }
+            Self::Tuple(t) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                // Tuple is hashable only if all elements are hashable
+                for obj in t.as_vec() {
+                    let h = obj.py_hash(heap, interns)?;
+                    h.hash(&mut hasher);
+                }
+                Some(hasher.finish())
+            }
             Self::Closure(f, _, _) | Self::FunctionDefaults(f, _) => {
                 let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
                 // TODO, this is NOT proper hashing, we should somehow hash the function properly
                 f.hash(&mut hasher);
                 Some(hasher.finish())
             }
-            // Mutable types cannot be hashed (Cell is handled specially in get_or_compute_hash)
-            Self::List(_) | Self::Dict(_) | Self::Set(_) | Self::Cell(_) => None,
+            Self::Range(range) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                range.start.hash(&mut hasher);
+                range.stop.hash(&mut hasher);
+                range.step.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            // Mutable types and exceptions cannot be hashed
+            // (Cell is handled specially in get_or_compute_hash)
+            Self::List(_) | Self::Dict(_) | Self::Set(_) | Self::Cell(_) | Self::Exception(_) => None,
         }
     }
 }
@@ -127,6 +149,8 @@ impl PyTrait for HeapData {
             Self::FrozenSet(fs) => fs.py_type(heap),
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => Type::Function,
             Self::Cell(_) => Type::Cell,
+            Self::Range(_) => Type::Range,
+            Self::Exception(e) => e.py_type(),
         }
     }
 
@@ -142,6 +166,8 @@ impl PyTrait for HeapData {
             // TODO: should include size of captured cells and defaults
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => 0,
             Self::Cell(v) => std::mem::size_of::<Value>() + v.py_estimate_size(),
+            Self::Range(_) => std::mem::size_of::<Range>(),
+            Self::Exception(e) => std::mem::size_of::<SimpleException>() + e.arg().map_or(0, String::len),
         }
     }
 
@@ -154,7 +180,9 @@ impl PyTrait for HeapData {
             Self::Dict(d) => PyTrait::py_len(d, heap, interns),
             Self::Set(s) => PyTrait::py_len(s, heap, interns),
             Self::FrozenSet(fs) => PyTrait::py_len(fs, heap, interns),
-            _ => None, // Cells don't have length
+            Self::Range(r) => Some(r.len()),
+            // Cells and Exceptions don't have length
+            Self::Cell(_) | Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) | Self::Exception(_) => None,
         }
     }
 
@@ -169,8 +197,9 @@ impl PyTrait for HeapData {
             (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_eq(b, heap, interns),
             (Self::Closure(a_id, a_cells, _), Self::Closure(b_id, b_cells, _)) => *a_id == *b_id && a_cells == b_cells,
             (Self::FunctionDefaults(a_id, _), Self::FunctionDefaults(b_id, _)) => *a_id == *b_id,
-            // Cells compare by identity only (handled at Value level via HeapId comparison)
-            (Self::Cell(_), Self::Cell(_)) => false,
+            (Self::Range(a), Self::Range(b)) => a.py_eq(b, heap, interns),
+            // Cells and Exceptions compare by identity only (handled at Value level via HeapId comparison)
+            (Self::Cell(_), Self::Cell(_)) | (Self::Exception(_), Self::Exception(_)) => false,
             _ => false, // Different types are never equal
         }
     }
@@ -199,6 +228,8 @@ impl PyTrait for HeapData {
                 }
             }
             Self::Cell(v) => v.py_dec_ref_ids(stack),
+            // Range and Exception have no nested heap references
+            Self::Range(_) | Self::Exception(_) => {}
         }
     }
 
@@ -213,6 +244,8 @@ impl PyTrait for HeapData {
             Self::FrozenSet(fs) => fs.py_bool(heap, interns),
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => true,
             Self::Cell(_) => true, // Cells are always truthy
+            Self::Range(r) => r.py_bool(heap, interns),
+            Self::Exception(_) => true, // Exceptions are always truthy
         }
     }
 
@@ -236,6 +269,8 @@ impl PyTrait for HeapData {
             }
             // Cell repr shows the contained value's type
             Self::Cell(v) => write!(f, "<cell: {} object>", v.py_type(Some(heap))),
+            Self::Range(r) => r.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::Exception(e) => e.py_repr_fmt(f),
         }
     }
     // py_str is always the same as py_repr which is the default impl
@@ -380,15 +415,17 @@ impl HashState {
         match data {
             // Cells are hashable by identity (like all Python objects without __hash__ override)
             // FrozenSet is immutable and hashable
+            // Range is immutable and hashable
             HeapData::Str(_)
             | HeapData::Bytes(_)
             | HeapData::Tuple(_)
             | HeapData::FrozenSet(_)
             | HeapData::Cell(_)
             | HeapData::Closure(_, _, _)
-            | HeapData::FunctionDefaults(_, _) => Self::Unknown,
-            // Mutable containers are unhashable
-            HeapData::List(_) | HeapData::Dict(_) | HeapData::Set(_) => Self::Unhashable,
+            | HeapData::FunctionDefaults(_, _)
+            | HeapData::Range(_) => Self::Unknown,
+            // Mutable containers and exceptions are unhashable
+            HeapData::List(_) | HeapData::Dict(_) | HeapData::Set(_) | HeapData::Exception(_) => Self::Unhashable,
         }
     }
 }
@@ -1053,7 +1090,8 @@ impl<T: ResourceTracker> Heap<T> {
     /// Collects child HeapIds from a HeapData value for GC traversal.
     fn collect_child_ids(&self, data: &HeapData, work_list: &mut Vec<HeapId>) {
         match data {
-            HeapData::Str(_) | HeapData::Bytes(_) => {}
+            // Leaf types with no heap references
+            HeapData::Str(_) | HeapData::Bytes(_) | HeapData::Range(_) | HeapData::Exception(_) => {}
             HeapData::List(list) => {
                 for value in list.as_vec() {
                     if let Value::Ref(id) = value {
