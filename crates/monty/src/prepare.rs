@@ -4,8 +4,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::{
     args::ArgExprs,
-    callable::Callable,
-    expressions::{Expr, ExprLoc, Identifier, Literal, NameScope, Node, PreparedFunctionDef, PreparedNode},
+    expressions::{Callable, Expr, ExprLoc, Identifier, Literal, NameScope, Node, PreparedFunctionDef, PreparedNode},
     fstring::{FStringPart, FormatSpec},
     intern::{InternerBuilder, StringId},
     namespace::NamespaceId,
@@ -1409,7 +1408,7 @@ fn collect_referenced_names_from_expr(
         }
         Expr::Call { callable, args } => {
             // Check if the callable is a Name reference
-            if let crate::callable::Callable::Name(ident) = callable {
+            if let Callable::Name(ident) = callable {
                 referenced.insert(interner.get_str(ident.name_id).to_string());
             }
             collect_referenced_names_from_args(args, referenced, interner);

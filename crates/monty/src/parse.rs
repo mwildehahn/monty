@@ -10,10 +10,9 @@ use ruff_text_size::{Ranged, TextRange};
 use crate::{
     args::{ArgExprs, Kwarg},
     builtins::Builtins,
-    callable::Callable,
     exception_private::ExcType,
     exception_public::{CodeLoc, MontyException},
-    expressions::{Expr, ExprLoc, Identifier, Literal, Node},
+    expressions::{Callable, Expr, ExprLoc, Identifier, Literal, Node},
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     intern::{InternerBuilder, StringId},
     operators::{CmpOperator, Operator},

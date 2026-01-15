@@ -18,10 +18,9 @@ use super::{
 use crate::{
     args::{ArgExprs, Kwarg},
     builtins::Builtins,
-    callable::Callable,
     exception_private::ExcType,
     exception_public::{MontyException, StackFrame},
-    expressions::{Expr, ExprLoc, Identifier, Literal, NameScope, PreparedFunctionDef, PreparedNode},
+    expressions::{Callable, Expr, ExprLoc, Identifier, Literal, NameScope, PreparedFunctionDef, PreparedNode},
     fstring::{encode_format_spec, ConversionFlag, FStringPart, FormatSpec},
     function::Function,
     intern::Interns,

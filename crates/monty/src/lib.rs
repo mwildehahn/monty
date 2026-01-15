@@ -2,7 +2,6 @@
 mod args;
 mod builtins;
 mod bytecode;
-mod callable;
 mod exception_private;
 mod exception_public;
 mod expressions;
