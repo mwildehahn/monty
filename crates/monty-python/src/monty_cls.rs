@@ -151,7 +151,7 @@ impl PyMonty {
             (Some(limits), Some(callback)) => {
                 let inner_tracker = LimitedTracker::new(extract_limits(limits)?);
                 let tracker = PySignalTracker::new(inner_tracker);
-                self.run_with_tracker(
+                self.run_hold_gil(
                     py,
                     input_values,
                     tracker,
@@ -162,16 +162,16 @@ impl PyMonty {
             (Some(limits), None) => {
                 let inner_tracker = LimitedTracker::new(extract_limits(limits)?);
                 let tracker = PySignalTracker::new(inner_tracker);
-                self.run_with_tracker(py, input_values, tracker, external_functions, StdPrint)
+                self.run_release_gil(py, input_values, tracker, external_functions, StdPrint)
             }
-            (None, Some(callback)) => self.run_with_tracker(
+            (None, Some(callback)) => self.run_hold_gil(
                 py,
                 input_values,
                 PySignalTracker::new(NoLimitTracker::default()),
                 external_functions,
                 CallbackStringPrint(callback),
             ),
-            (None, None) => self.run_with_tracker(
+            (None, None) => self.run_release_gil(
                 py,
                 input_values,
                 PySignalTracker::new(NoLimitTracker::default()),
@@ -192,29 +192,41 @@ impl PyMonty {
         // Extract input values in the order they were declared
         let input_values = self.extract_input_values(inputs)?;
 
-        macro_rules! start {
+        // Clone the runner since start() consumes it - allows reuse of the parsed code
+        macro_rules! start_hold_gil {
             ($resource_tracker:expr, $print_output:expr) => {
-                // Clone the runner since start() consumes it - allows reuse of the parsed code
                 self.runner
                     .clone()
                     .start(input_values, $resource_tracker, &mut $print_output)
                     .map_err(|e| MontyError::new_err(py, e))?
             };
         }
+        macro_rules! start_release_gil {
+            ($resource_tracker:expr, $print_output:expr) => {{
+                let runner = self.runner.clone();
+                py.detach(|| runner.start(input_values, $resource_tracker, &mut $print_output))
+                    .map_err(|e| MontyError::new_err(py, e))?
+            }};
+        }
 
         // separate code paths due to generics
         let progress = match (limits, print_callback) {
-            (Some(limits), Some(callback)) => EitherProgress::Limited(start!(
-                LimitedTracker::new(extract_limits(limits)?),
-                CallbackStringPrint(callback)
-            )),
+            (Some(limits), Some(callback)) => {
+                let limits = PySignalTracker::new(LimitedTracker::new(extract_limits(limits)?));
+                EitherProgress::Limited(start_hold_gil!(limits, CallbackStringPrint(callback)))
+            }
             (Some(limits), None) => {
-                EitherProgress::Limited(start!(LimitedTracker::new(extract_limits(limits)?), StdPrint))
+                let limits = PySignalTracker::new(LimitedTracker::new(extract_limits(limits)?));
+                EitherProgress::Limited(start_release_gil!(limits, StdPrint))
             }
             (None, Some(callback)) => {
-                EitherProgress::NoLimit(start!(NoLimitTracker::default(), CallbackStringPrint(callback)))
+                let limits = PySignalTracker::new(NoLimitTracker::default());
+                EitherProgress::NoLimit(start_hold_gil!(limits, CallbackStringPrint(callback)))
             }
-            (None, None) => EitherProgress::NoLimit(start!(NoLimitTracker::default(), StdPrint)),
+            (None, None) => {
+                let limits = PySignalTracker::new(NoLimitTracker::default());
+                EitherProgress::NoLimit(start_release_gil!(limits, StdPrint))
+            }
         };
         progress.progress_or_complete(
             py,
@@ -342,8 +354,8 @@ impl PyMonty {
             .collect::<PyResult<_>>()
     }
 
-    /// Runs code with a generic tracker.
-    fn run_with_tracker(
+    /// Runs code with a generic resource tracker while holding the GIL.
+    fn run_hold_gil(
         &self,
         py: Python<'_>,
         input_values: Vec<MontyObject>,
@@ -353,18 +365,92 @@ impl PyMonty {
     ) -> PyResult<Py<PyAny>> {
         let dataclass_registry = self.dataclass_registry.bind(py);
         if self.external_function_names.is_empty() {
-            match self.runner.run(input_values, tracker, &mut print_output) {
+            return match self.runner.run(input_values, tracker, &mut print_output) {
                 Ok(v) => monty_to_py(py, &v, dataclass_registry),
                 Err(err) => Err(MontyError::new_err(py, err)),
+            };
+        }
+        // Clone the runner since start() consumes it - allows reuse of the parsed code
+        let mut progress = self
+            .runner
+            .clone()
+            .start(input_values, tracker, &mut print_output)
+            .map_err(|e| MontyError::new_err(py, e))?;
+
+        loop {
+            match progress {
+                RunProgress::Complete(result) => return monty_to_py(py, &result, dataclass_registry),
+                RunProgress::FunctionCall {
+                    function_name,
+                    args,
+                    kwargs,
+                    state,
+                } => {
+                    let registry = external_functions
+                        .map(|d| ExternalFunctionRegistry::new(py, d, dataclass_registry))
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "External function '{function_name}' called but no external_functions provided"
+                            ))
+                        })?;
+
+                    let return_value = registry.call(&function_name, &args, &kwargs);
+
+                    progress = state
+                        .run(return_value, &mut print_output)
+                        .map_err(|e| MontyError::new_err(py, e))?;
+                }
             }
-        } else {
-            // Clone the runner since start() consumes it - allows reuse of the parsed code
-            let progress = self
-                .runner
-                .clone()
-                .start(input_values, tracker, &mut print_output)
-                .map_err(|e| MontyError::new_err(py, e))?;
-            execute_progress(py, progress, external_functions, &mut print_output, dataclass_registry)
+        }
+    }
+
+    /// Runs code with a generic resource tracker while releasing the GIL.
+    fn run_release_gil(
+        &self,
+        py: Python<'_>,
+        input_values: Vec<MontyObject>,
+        tracker: impl ResourceTracker + Send,
+        external_functions: Option<&Bound<'_, PyDict>>,
+        mut print_output: impl PrintWriter + Send,
+    ) -> PyResult<Py<PyAny>> {
+        let dataclass_registry = self.dataclass_registry.bind(py);
+        if self.external_function_names.is_empty() {
+            let runner = &self.runner;
+            return match py.detach(|| runner.run(input_values, tracker, &mut print_output)) {
+                Ok(v) => monty_to_py(py, &v, dataclass_registry),
+                Err(err) => Err(MontyError::new_err(py, err)),
+            };
+        }
+        // Clone the runner since start() consumes it - allows reuse of the parsed code
+        let runner = self.runner.clone();
+        let mut progress = py
+            .detach(|| runner.start(input_values, tracker, &mut print_output))
+            .map_err(|e| MontyError::new_err(py, e))?;
+
+        loop {
+            match progress {
+                RunProgress::Complete(result) => return monty_to_py(py, &result, dataclass_registry),
+                RunProgress::FunctionCall {
+                    function_name,
+                    args,
+                    kwargs,
+                    state,
+                } => {
+                    let registry = external_functions
+                        .map(|d| ExternalFunctionRegistry::new(py, d, dataclass_registry))
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "External function '{function_name}' called but no external_functions provided"
+                            ))
+                        })?;
+
+                    let return_value = registry.call(&function_name, &args, &kwargs);
+
+                    progress = py
+                        .detach(|| state.run(return_value, &mut print_output))
+                        .map_err(|e| MontyError::new_err(py, e))?;
+                }
+            }
         }
     }
 }
@@ -372,8 +458,8 @@ impl PyMonty {
 /// pyclass doesn't support generic types, hence hard coding the generics
 #[derive(Debug)]
 enum EitherProgress {
-    NoLimit(RunProgress<NoLimitTracker>),
-    Limited(RunProgress<LimitedTracker>),
+    NoLimit(RunProgress<PySignalTracker<NoLimitTracker>>),
+    Limited(RunProgress<PySignalTracker<LimitedTracker>>),
 }
 
 impl EitherProgress {
@@ -426,14 +512,14 @@ impl EitherProgress {
     }
 }
 
-/// Runtime execution snapshot, parameterized by resource tracker type.
+/// Runtime execution snapshot, holds multiple resource tracker types since pyclass structs can't be generic.
 ///
 /// Used internally by `PyMontySnapshot` to store execution state.
 /// The `Done` variant indicates the snapshot has been consumed.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 enum EitherSnapshot {
-    NoLimit(Snapshot<NoLimitTracker>),
-    Limited(Snapshot<LimitedTracker>),
+    NoLimit(Snapshot<PySignalTracker<NoLimitTracker>>),
+    Limited(Snapshot<PySignalTracker<LimitedTracker>>),
     /// Done is used when taking the snapshot to run it
     /// should only be done after execution is complete
     Done,
@@ -501,7 +587,7 @@ impl PyMontySnapshot {
                 let result = if let Some(print_callback) = &self.print_callback {
                     snapshot.run(external_result, &mut CallbackStringPrint(print_callback.bind(py)))
                 } else {
-                    snapshot.run(external_result, &mut StdPrint)
+                    py.detach(|| snapshot.run(external_result, &mut StdPrint))
                 };
                 EitherProgress::NoLimit(result.map_err(|e| MontyError::new_err(py, e))?)
             }
@@ -509,7 +595,7 @@ impl PyMontySnapshot {
                 let result = if let Some(print_callback) = &self.print_callback {
                     snapshot.run(external_result, &mut CallbackStringPrint(print_callback.bind(py)))
                 } else {
-                    snapshot.run(external_result, &mut StdPrint)
+                    py.detach(|| snapshot.run(external_result, &mut StdPrint))
                 };
                 EitherProgress::Limited(result.map_err(|e| MontyError::new_err(py, e))?)
             }
@@ -673,43 +759,6 @@ fn prep_registry<'py>(py: Python<'py>, dataclass_registry: Option<Bound<'py, PyL
         }
     }
     Ok(dc_registry)
-}
-
-/// Executes the `RunProgress` loop, handling external function calls.
-///
-/// Checks for pending Python signals (e.g., Ctrl+C) after execution completes.
-fn execute_progress<'py>(
-    py: Python<'py>,
-    mut progress: RunProgress<impl ResourceTracker>,
-    external_functions: Option<&Bound<'py, PyDict>>,
-    print_output: &mut impl PrintWriter,
-    dataclass_registry: &Bound<'py, PyDict>,
-) -> PyResult<Py<PyAny>> {
-    loop {
-        match progress {
-            RunProgress::Complete(result) => return monty_to_py(py, &result, dataclass_registry),
-            RunProgress::FunctionCall {
-                function_name,
-                args,
-                kwargs,
-                state,
-            } => {
-                let registry = external_functions
-                    .map(|d| ExternalFunctionRegistry::new(py, d, dataclass_registry))
-                    .ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "External function '{function_name}' called but no external_functions provided"
-                        ))
-                    })?;
-
-                let return_value = registry.call(&function_name, &args, &kwargs);
-
-                progress = state
-                    .run(return_value, print_output)
-                    .map_err(|e| MontyError::new_err(py, e))?;
-            }
-        }
-    }
 }
 
 fn list_str(arg: Option<&Bound<'_, PyList>>, name: &str) -> PyResult<Vec<String>> {
