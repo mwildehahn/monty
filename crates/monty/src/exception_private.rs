@@ -723,14 +723,6 @@ impl ExcType {
         SimpleException::new_msg(Self::ZeroDivisionError, "division by zero")
     }
 
-    /// Creates a ZeroDivisionError for 0 raised to a negative power.
-    ///
-    /// Matches CPython 3.14's format: `ZeroDivisionError('zero to a negative power')`
-    #[must_use]
-    pub(crate) fn zero_pow_negative() -> SimpleException {
-        SimpleException::new_msg(Self::ZeroDivisionError, "zero to a negative power")
-    }
-
     /// Creates an OverflowError for string/sequence repetition with count too large.
     ///
     /// Matches CPython's format: `OverflowError('cannot fit 'int' into an index-sized integer')`
@@ -783,6 +775,44 @@ impl ExcType {
             format!("bad operand type for unary {op}: '{value_type}'"),
         )
         .into()
+    }
+
+    /// Creates a TypeError for functions that require an integer argument.
+    ///
+    /// Matches CPython's format: `TypeError: '{type}' object cannot be interpreted as an integer`
+    #[must_use]
+    pub(crate) fn type_error_not_integer(type_: Type) -> RunError {
+        SimpleException::new_msg(
+            Self::TypeError,
+            format!("'{type_}' object cannot be interpreted as an integer"),
+        )
+        .into()
+    }
+
+    /// Creates a ZeroDivisionError for zero raised to a negative power.
+    ///
+    /// Matches CPython's format: `ZeroDivisionError: zero to a negative power`
+    /// Note: CPython uses the same message for both int and float zero ** negative.
+    #[must_use]
+    pub(crate) fn zero_negative_power() -> RunError {
+        SimpleException::new_msg(Self::ZeroDivisionError, "zero to a negative power").into()
+    }
+
+    /// Creates an OverflowError for exponents that are too large.
+    ///
+    /// Matches CPython's format: `OverflowError: exponent too large`
+    #[must_use]
+    pub(crate) fn overflow_exponent_too_large() -> RunError {
+        SimpleException::new_msg(Self::OverflowError, "exponent too large").into()
+    }
+
+    /// Creates a ZeroDivisionError for divmod by zero (both integer and float).
+    ///
+    /// Matches CPython's format: `ZeroDivisionError: division by zero`
+    /// Note: CPython uses the same message for both integer and float divmod.
+    #[must_use]
+    pub(crate) fn divmod_by_zero() -> RunError {
+        SimpleException::new_msg(Self::ZeroDivisionError, "division by zero").into()
     }
 }
 

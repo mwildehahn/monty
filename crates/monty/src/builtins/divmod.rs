@@ -1,11 +1,14 @@
 //! Implementation of the divmod() builtin function.
 
+use num_bigint::BigInt;
+use num_integer::Integer;
+
 use crate::{
     args::ArgValues,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{Heap, HeapData},
     resource::ResourceTracker,
-    types::{PyTrait, Tuple},
+    types::{LongInt, PyTrait, Tuple},
     value::Value,
 };
 
@@ -21,7 +24,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
     let result = match (&a, &b) {
         (Value::Int(x), Value::Int(y)) => {
             if *y == 0 {
-                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "integer division or modulo by zero").into())
+                Err(ExcType::divmod_by_zero())
             } else {
                 // Python uses floor division (toward negative infinity), not Euclidean
                 let (quot, rem) = floor_divmod(*x, *y);
@@ -29,9 +32,85 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                 Ok(Value::Ref(tuple_id))
             }
         }
+        (Value::Int(x), Value::Ref(id)) => {
+            if let HeapData::LongInt(li) = heap.get(*id) {
+                if li.is_zero() {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let x_bi = BigInt::from(*x);
+                    let (quot, rem) = bigint_floor_divmod(&x_bi, li.inner());
+                    let quot_val = LongInt::new(quot).into_value(heap)?;
+                    let rem_val = LongInt::new(rem).into_value(heap)?;
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            } else {
+                let a_type = a.py_type(heap);
+                let b_type = b.py_type(heap);
+                Err(SimpleException::new_msg(
+                    ExcType::TypeError,
+                    format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
+                )
+                .into())
+            }
+        }
+        (Value::Ref(id), Value::Int(y)) => {
+            if let HeapData::LongInt(li) = heap.get(*id) {
+                if *y == 0 {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let y_bi = BigInt::from(*y);
+                    let (quot, rem) = bigint_floor_divmod(li.inner(), &y_bi);
+                    let quot_val = LongInt::new(quot).into_value(heap)?;
+                    let rem_val = LongInt::new(rem).into_value(heap)?;
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            } else {
+                let a_type = a.py_type(heap);
+                let b_type = b.py_type(heap);
+                Err(SimpleException::new_msg(
+                    ExcType::TypeError,
+                    format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
+                )
+                .into())
+            }
+        }
+        (Value::Ref(id1), Value::Ref(id2)) => {
+            let x_bi = if let HeapData::LongInt(li) = heap.get(*id1) {
+                li.inner().clone()
+            } else {
+                let a_type = a.py_type(heap);
+                let b_type = b.py_type(heap);
+                return Err(SimpleException::new_msg(
+                    ExcType::TypeError,
+                    format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
+                )
+                .into());
+            };
+            if let HeapData::LongInt(li) = heap.get(*id2) {
+                if li.is_zero() {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let (quot, rem) = bigint_floor_divmod(&x_bi, li.inner());
+                    let quot_val = LongInt::new(quot).into_value(heap)?;
+                    let rem_val = LongInt::new(rem).into_value(heap)?;
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            } else {
+                let a_type = a.py_type(heap);
+                let b_type = b.py_type(heap);
+                Err(SimpleException::new_msg(
+                    ExcType::TypeError,
+                    format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
+                )
+                .into())
+            }
+        }
         (Value::Float(x), Value::Float(y)) => {
             if *y == 0.0 {
-                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
+                Err(ExcType::divmod_by_zero())
             } else {
                 let quot = (x / y).floor();
                 let rem = x - quot * y;
@@ -42,7 +121,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
         }
         (Value::Int(x), Value::Float(y)) => {
             if *y == 0.0 {
-                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
+                Err(ExcType::divmod_by_zero())
             } else {
                 let xf = *x as f64;
                 let quot = (xf / y).floor();
@@ -54,7 +133,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
         }
         (Value::Float(x), Value::Int(y)) => {
             if *y == 0 {
-                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
+                Err(ExcType::divmod_by_zero())
             } else {
                 let yf = *y as f64;
                 let quot = (x / yf).floor();
@@ -96,4 +175,11 @@ fn floor_divmod(a: i64, b: i64) -> (i64, i64) {
     } else {
         (quot, rem)
     }
+}
+
+/// Computes Python-style floor division and modulo for BigInts.
+///
+/// Uses `div_mod_floor` from num_integer for correct floor semantics.
+fn bigint_floor_divmod(a: &BigInt, b: &BigInt) -> (BigInt, BigInt) {
+    a.div_mod_floor(b)
 }
