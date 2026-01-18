@@ -21,8 +21,8 @@ use crate::{
     exception_private::ExcType,
     exception_public::{MontyException, StackFrame},
     expressions::{
-        Callable, CmpOperator, Expr, ExprLoc, Identifier, Literal, NameScope, Operator, PreparedFunctionDef,
-        PreparedNode,
+        Callable, CmpOperator, Comprehension, Expr, ExprLoc, Identifier, Literal, NameScope, Operator,
+        PreparedFunctionDef, PreparedNode, UnpackTarget,
     },
     fstring::{ConversionFlag, FStringPart, FormatSpec, encode_format_spec},
     function::Function,
@@ -233,9 +233,9 @@ impl<'a> Compiler<'a> {
                 self.code.set_location(*targets_position, None);
                 self.code.emit_u8(Opcode::UnpackSequence, count);
                 // After UnpackSequence, values are on stack with first item on top
-                // Store them in order (first target gets first item)
+                // Store them in order (first target gets first item), handling nesting
                 for target in targets {
-                    self.compile_store(target);
+                    self.compile_unpack_target(target);
                 }
             }
 
@@ -539,6 +539,18 @@ impl<'a> Compiler<'a> {
                 let part_count = self.compile_fstring_parts(parts)?;
                 self.code.emit_u16(Opcode::BuildFString, part_count);
             }
+
+            Expr::ListComp { elt, generators } => {
+                self.compile_list_comp(elt, generators)?;
+            }
+
+            Expr::SetComp { elt, generators } => {
+                self.compile_set_comp(elt, generators)?;
+            }
+
+            Expr::DictComp { key, value, generators } => {
+                self.compile_dict_comp(key, value, generators)?;
+            }
         }
         Ok(())
     }
@@ -589,7 +601,13 @@ impl<'a> Compiler<'a> {
         let slot = u16::try_from(ident.namespace_id().index()).expect("local slot exceeds u16");
         match ident.scope {
             NameScope::Local => {
-                // Register the name for NameError messages
+                // True local - register name and mark as assigned for UnboundLocalError
+                self.code.register_local_name(slot, ident.name_id);
+                self.code.register_assigned_local(slot);
+                self.code.emit_load_local(slot);
+            }
+            NameScope::LocalUnassigned => {
+                // Undefined reference - register name but NOT as assigned for NameError
                 self.code.register_local_name(slot, ident.name_id);
                 self.code.emit_load_local(slot);
             }
@@ -619,8 +637,8 @@ impl<'a> Compiler<'a> {
     fn compile_store(&mut self, target: &Identifier) {
         let slot = u16::try_from(target.namespace_id().index()).expect("local slot exceeds u16");
         match target.scope {
-            NameScope::Local => {
-                // Register the name for NameError messages
+            NameScope::Local | NameScope::LocalUnassigned => {
+                // Both true locals and initially-unassigned slots use local storage
                 self.code.register_local_name(slot, target.name_id);
                 self.code.emit_store_local(slot);
             }
@@ -1137,7 +1155,7 @@ impl<'a> Compiler<'a> {
     /// Compiles a for loop.
     fn compile_for(
         &mut self,
-        target: &Identifier,
+        target: &UnpackTarget,
         iter: &ExprLoc,
         body: &[PreparedNode],
         or_else: &[PreparedNode],
@@ -1159,8 +1177,8 @@ impl<'a> Compiler<'a> {
         // ForIter: advance iterator or jump to end
         let end_jump = self.code.emit_jump(Opcode::ForIter);
 
-        // Store current value to target
-        self.compile_store(target);
+        // Store current value to target (handles both single identifiers and tuple unpacking)
+        self.compile_unpack_target(target);
 
         // Compile body
         self.compile_block(body)?;
@@ -1183,6 +1201,163 @@ impl<'a> Compiler<'a> {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Comprehension Compilation
+    // ========================================================================
+
+    /// Compiles a list comprehension: `[elt for target in iter if cond...]`
+    ///
+    /// Bytecode structure:
+    /// ```text
+    /// BUILD_LIST 0          ; empty result
+    /// <compile first iter>
+    /// GET_ITER
+    /// loop_start:
+    ///   FOR_ITER end_loop
+    ///   STORE_LOCAL target
+    ///   <compile filters - jump back to loop_start if any fails>
+    ///   [nested generators...]
+    ///   <compile elt>
+    ///   LIST_APPEND depth
+    ///   JUMP loop_start
+    /// end_loop:
+    /// ; result list on stack
+    /// ```
+    fn compile_list_comp(&mut self, elt: &ExprLoc, generators: &[Comprehension]) -> Result<(), CompileError> {
+        // Build empty list
+        self.code.emit_u16(Opcode::BuildList, 0);
+
+        // Compile the nested generators, which will eventually append to the list
+        let depth = u8::try_from(generators.len()).expect("too many generators in list comprehension");
+        self.compile_comprehension_generators(generators, 0, |compiler| {
+            compiler.compile_expr(elt)?;
+            compiler.code.emit_u8(Opcode::ListAppend, depth);
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Compiles a set comprehension: `{elt for target in iter if cond...}`
+    fn compile_set_comp(&mut self, elt: &ExprLoc, generators: &[Comprehension]) -> Result<(), CompileError> {
+        // Build empty set
+        self.code.emit_u16(Opcode::BuildSet, 0);
+
+        // Compile the nested generators, which will eventually add to the set
+        let depth = u8::try_from(generators.len()).expect("too many generators in set comprehension");
+        self.compile_comprehension_generators(generators, 0, |compiler| {
+            compiler.compile_expr(elt)?;
+            compiler.code.emit_u8(Opcode::SetAdd, depth);
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Compiles a dict comprehension: `{key: value for target in iter if cond...}`
+    fn compile_dict_comp(
+        &mut self,
+        key: &ExprLoc,
+        value: &ExprLoc,
+        generators: &[Comprehension],
+    ) -> Result<(), CompileError> {
+        // Build empty dict
+        self.code.emit_u16(Opcode::BuildDict, 0);
+
+        // Compile the nested generators, which will eventually set items in the dict
+        let depth = u8::try_from(generators.len()).expect("too many generators in dict comprehension");
+        self.compile_comprehension_generators(generators, 0, |compiler| {
+            compiler.compile_expr(key)?;
+            compiler.compile_expr(value)?;
+            compiler.code.emit_u8(Opcode::DictSetItem, depth);
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    /// Recursively compiles comprehension generators (the for/if clauses).
+    ///
+    /// For each generator:
+    /// 1. Compile the iterator expression and get iterator
+    /// 2. Start loop: FOR_ITER to get next value or exit
+    /// 3. Store to target variable
+    /// 4. Compile filter conditions (jump back to loop start if any fails)
+    /// 5. Either recurse for inner generator, or call the body callback
+    /// 6. Jump back to loop start
+    ///
+    /// The `body_fn` callback is called at the innermost level to emit the element/key-value code.
+    fn compile_comprehension_generators(
+        &mut self,
+        generators: &[Comprehension],
+        index: usize,
+        body_fn: impl FnOnce(&mut Self) -> Result<(), CompileError>,
+    ) -> Result<(), CompileError> {
+        let generator = &generators[index];
+
+        // Compile iterator expression
+        self.compile_expr(&generator.iter)?;
+        self.code.emit(Opcode::GetIter);
+
+        // Loop start
+        let loop_start = self.code.current_offset();
+
+        // FOR_ITER: advance iterator or jump to end
+        let end_jump = self.code.emit_jump(Opcode::ForIter);
+
+        // Store current value to target (single variable or tuple unpacking)
+        self.compile_unpack_target(&generator.target);
+
+        // Compile filter conditions - jump back to loop start if any fails
+        for cond in &generator.ifs {
+            self.compile_expr(cond)?;
+            // If condition is false, skip to next iteration
+            self.code.emit_jump_to(Opcode::JumpIfFalse, loop_start);
+        }
+
+        // Either recurse for inner generator, or emit body
+        if index + 1 < generators.len() {
+            // Recurse for inner generator
+            self.compile_comprehension_generators(generators, index + 1, body_fn)?;
+        } else {
+            // Innermost level - emit body (the element/key-value expression and append/add/set)
+            body_fn(self)?;
+        }
+
+        // Jump back to loop start
+        self.code.emit_jump_to(Opcode::Jump, loop_start);
+
+        // End of loop
+        self.code.patch_jump(end_jump);
+
+        Ok(())
+    }
+
+    /// Compiles storage of an unpack target - either a single identifier or nested tuple.
+    ///
+    /// For single identifiers: emits a simple store.
+    /// For nested tuples: emits `UnpackSequence` and recursively handles each sub-target.
+    fn compile_unpack_target(&mut self, target: &UnpackTarget) {
+        match target {
+            UnpackTarget::Name(ident) => {
+                // Single identifier - just store directly
+                self.compile_store(ident);
+            }
+            UnpackTarget::Tuple { targets, position } => {
+                // Nested tuple - emit UnpackSequence then recursively store each
+                let count = u8::try_from(targets.len()).expect("too many targets in nested unpack");
+                // Set location to targets for proper caret in tracebacks
+                self.code.set_location(*position, None);
+                self.code.emit_u8(Opcode::UnpackSequence, count);
+                // After UnpackSequence, values are on stack with first item on top
+                // Store them in order, recursively handling further nesting
+                for target in targets {
+                    self.compile_unpack_target(target);
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -1629,7 +1804,7 @@ impl<'a> Compiler<'a> {
     fn compile_delete(&mut self, target: &Identifier) {
         let slot = u16::try_from(target.namespace_id().index()).expect("local slot exceeds u16");
         match target.scope {
-            NameScope::Local => {
+            NameScope::Local | NameScope::LocalUnassigned => {
                 if let Ok(s) = u8::try_from(slot) {
                     self.code.emit_u8(Opcode::DeleteLocal, s);
                 } else {

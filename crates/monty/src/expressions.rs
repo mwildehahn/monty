@@ -19,9 +19,16 @@ use crate::{
 ///   are accessed through Cells
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum NameScope {
-    /// Variable is in the current frame's local namespace
+    /// Variable is in the current frame's local namespace (assigned somewhere in this function).
+    ///
+    /// If accessed before assignment, raises `UnboundLocalError`.
     #[default]
     Local,
+    /// Variable reference that doesn't exist in any scope.
+    ///
+    /// A local slot is allocated but never assigned. Accessing raises `NameError`
+    /// (not `UnboundLocalError`) because the name was never defined anywhere.
+    LocalUnassigned,
     /// Variable is in the module-level global namespace
     Global,
     /// Variable accessed through a cell (heap-allocated container).
@@ -173,6 +180,63 @@ pub enum Expr {
         body: Box<ExprLoc>,
         orelse: Box<ExprLoc>,
     },
+    /// List comprehension: `[elt for target in iter if cond...]`
+    ///
+    /// Builds a new list by iterating and optionally filtering. Loop variables
+    /// are scoped to the comprehension and do not leak to the enclosing scope.
+    ListComp {
+        elt: Box<ExprLoc>,
+        generators: Vec<Comprehension>,
+    },
+    /// Set comprehension: `{elt for target in iter if cond...}`
+    ///
+    /// Builds a new set by iterating and optionally filtering. Duplicate values
+    /// are deduplicated. Loop variables are scoped to the comprehension.
+    SetComp {
+        elt: Box<ExprLoc>,
+        generators: Vec<Comprehension>,
+    },
+    /// Dict comprehension: `{key: value for target in iter if cond...}`
+    ///
+    /// Builds a new dict by iterating and optionally filtering. Later values
+    /// overwrite earlier ones for duplicate keys. Loop variables are scoped
+    /// to the comprehension.
+    DictComp {
+        key: Box<ExprLoc>,
+        value: Box<ExprLoc>,
+        generators: Vec<Comprehension>,
+    },
+}
+
+/// Target for tuple unpacking - can be a single name or nested tuple.
+///
+/// Supports recursive structures like `(a, b), c` or `a, (b, c)`.
+/// Used in assignment statements, for loop targets, and comprehension targets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum UnpackTarget {
+    /// Single identifier: `a`
+    Name(Identifier),
+    /// Nested tuple: `(a, b)` - can contain further nested tuples
+    Tuple {
+        /// The targets to unpack into (can be names or nested tuples)
+        targets: Vec<Self>,
+        /// Source position covering all targets (for error caret placement)
+        position: CodeRange,
+    },
+}
+
+/// A generator clause in a comprehension: `for target in iter [if cond1] [if cond2]...`
+///
+/// Represents one `for` clause with zero or more `if` filters. Multiple generators
+/// create nested iteration (the rightmost varies fastest).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Comprehension {
+    /// Loop variable - either single identifier or tuple unpacking pattern.
+    pub target: UnpackTarget,
+    /// Iterable expression to loop over.
+    pub iter: ExprLoc,
+    /// Zero or more filter conditions (all must be truthy for the element to be included).
+    pub ifs: Vec<ExprLoc>,
 }
 
 impl Expr {
@@ -258,12 +322,13 @@ pub enum Node<F> {
         target: Identifier,
         object: ExprLoc,
     },
-    /// Tuple unpacking assignment (e.g., `a, b = some_tuple`).
+    /// Tuple unpacking assignment (e.g., `a, b = some_tuple` or `(a, b), c = nested`).
     ///
     /// The right-hand side is evaluated, then unpacked into the targets in order.
-    /// The number of targets must match the length of the sequence being unpacked.
+    /// Supports nested unpacking like `(a, b), c = ((1, 2), 'x')`.
     UnpackAssign {
-        targets: Vec<Identifier>,
+        /// The targets to unpack into (can be names or nested tuples)
+        targets: Vec<UnpackTarget>,
         /// Source position covering all targets (for error message caret placement)
         targets_position: CodeRange,
         object: ExprLoc,
@@ -290,7 +355,8 @@ pub enum Node<F> {
         value: ExprLoc,
     },
     For {
-        target: Identifier,
+        /// Loop target - either a single identifier or tuple unpacking pattern.
+        target: UnpackTarget,
         iter: ExprLoc,
         body: Vec<Self>,
         or_else: Vec<Self>,

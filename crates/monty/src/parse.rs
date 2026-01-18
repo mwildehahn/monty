@@ -14,7 +14,9 @@ use crate::{
     builtins::Builtins,
     exception_private::ExcType,
     exception_public::{CodeLoc, MontyException},
-    expressions::{Callable, CmpOperator, Expr, ExprLoc, Identifier, Literal, Node, Operator},
+    expressions::{
+        Callable, CmpOperator, Comprehension, Expr, ExprLoc, Identifier, Literal, Node, Operator, UnpackTarget,
+    },
     fstring::{ConversionFlag, FStringPart, FormatSpec},
     intern::{InternerBuilder, StringId},
     value::Attr,
@@ -270,7 +272,7 @@ impl<'a> Parser<'a> {
                     return Err(ParseError::not_implemented("async for loops"));
                 }
                 Ok(Node::For {
-                    target: self.parse_identifier(*target)?,
+                    target: self.parse_unpack_target(*target)?,
                     iter: self.parse_expression(*iter)?,
                     body: self.parse_statements(body)?,
                     or_else: self.parse_statements(orelse)?,
@@ -386,12 +388,12 @@ impl<'a> Parser<'a> {
                 target_position: self.convert_range(range),
                 value: self.parse_expression(rhs)?,
             }),
-            // Tuple unpacking like a, b = value
+            // Tuple unpacking like a, b = value or (a, b), c = nested
             AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) => {
                 let targets_position = self.convert_range(range);
                 let targets = elts
                     .into_iter()
-                    .map(|e| self.parse_identifier(e))
+                    .map(|e| self.parse_unpack_target(e)) // Use parse_unpack_target for recursion
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Node::UnpackAssign {
                     targets,
@@ -500,10 +502,54 @@ impl<'a> Parser<'a> {
                 let elements: Result<Vec<_>, _> = elts.into_iter().map(|e| self.parse_expression(e)).collect();
                 Ok(ExprLoc::new(self.convert_range(range), Expr::Set(elements?)))
             }
-            AstExpr::ListComp(_) => Err(ParseError::not_implemented("list comprehensions")),
-            AstExpr::SetComp(_) => Err(ParseError::not_implemented("set comprehensions")),
-            AstExpr::DictComp(_) => Err(ParseError::not_implemented("dictionary comprehensions")),
-            AstExpr::Generator(_) => Err(ParseError::not_implemented("generator expressions")),
+            AstExpr::ListComp(ast::ExprListComp {
+                elt, generators, range, ..
+            }) => {
+                let elt = Box::new(self.parse_expression(*elt)?);
+                let generators = self.parse_comprehension_generators(generators)?;
+                Ok(ExprLoc::new(
+                    self.convert_range(range),
+                    Expr::ListComp { elt, generators },
+                ))
+            }
+            AstExpr::SetComp(ast::ExprSetComp {
+                elt, generators, range, ..
+            }) => {
+                let elt = Box::new(self.parse_expression(*elt)?);
+                let generators = self.parse_comprehension_generators(generators)?;
+                Ok(ExprLoc::new(
+                    self.convert_range(range),
+                    Expr::SetComp { elt, generators },
+                ))
+            }
+            AstExpr::DictComp(ast::ExprDictComp {
+                key,
+                value,
+                generators,
+                range,
+                ..
+            }) => {
+                let key = Box::new(self.parse_expression(*key)?);
+                let value = Box::new(self.parse_expression(*value)?);
+                let generators = self.parse_comprehension_generators(generators)?;
+                Ok(ExprLoc::new(
+                    self.convert_range(range),
+                    Expr::DictComp { key, value, generators },
+                ))
+            }
+            AstExpr::Generator(ast::ExprGenerator {
+                elt, generators, range, ..
+            }) => {
+                // TODO: When proper generators are implemented, this should produce
+                // Expr::Generator instead of Expr::ListComp. Currently we treat generator
+                // expressions as list comprehensions since we don't have generator support.
+                let elt = Box::new(self.parse_expression(*elt)?);
+                let generators = self.parse_comprehension_generators(generators)?;
+                Ok(ExprLoc::new(
+                    self.convert_range(range),
+                    Expr::ListComp { elt, generators },
+                ))
+            }
             AstExpr::Await(_) => Err(ParseError::not_implemented("await expressions")),
             AstExpr::Yield(_) => Err(ParseError::not_implemented("yield expressions")),
             AstExpr::YieldFrom(_) => Err(ParseError::not_implemented("yield from expressions")),
@@ -718,6 +764,30 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses an unpack target - either a single identifier or a nested tuple.
+    ///
+    /// Handles patterns like `a` (single variable), `a, b` (flat tuple), or `(a, b), c` (nested).
+    fn parse_unpack_target(&mut self, ast: AstExpr) -> Result<UnpackTarget, ParseError> {
+        match ast {
+            AstExpr::Name(ast::ExprName { id, range, .. }) => Ok(UnpackTarget::Name(self.identifier(&id, range))),
+            AstExpr::Tuple(ast::ExprTuple { elts, range, .. }) => {
+                let position = self.convert_range(range);
+                let targets = elts
+                    .into_iter()
+                    .map(|e| self.parse_unpack_target(e)) // Recursive call for nested tuples
+                    .collect::<Result<Vec<_>, _>>()?;
+                if targets.is_empty() {
+                    return Err(ParseError::syntax("empty tuple in unpack target", position));
+                }
+                Ok(UnpackTarget::Tuple { targets, position })
+            }
+            other => Err(ParseError::syntax(
+                format!("invalid unpacking target: {other:?}"),
+                self.convert_range(other.range()),
+            )),
+        }
+    }
+
     fn identifier(&mut self, id: &Name, range: TextRange) -> Identifier {
         let string_id = self.interner.intern(id);
         Identifier::new(string_id, self.convert_range(range))
@@ -738,6 +808,33 @@ impl<'a> Parser<'a> {
                     None => None,
                 };
                 Ok(ParsedParam { name, default })
+            })
+            .collect()
+    }
+
+    /// Parses comprehension generators (the `for ... in ... if ...` clauses).
+    ///
+    /// Each generator represents one `for` clause with zero or more `if` filters.
+    /// Multiple generators create nested iteration. Supports both single identifiers
+    /// (`for x in ...`) and tuple unpacking (`for x, y in ...`).
+    fn parse_comprehension_generators(
+        &mut self,
+        generators: Vec<ast::Comprehension>,
+    ) -> Result<Vec<Comprehension>, ParseError> {
+        generators
+            .into_iter()
+            .map(|comp| {
+                if comp.is_async {
+                    return Err(ParseError::not_implemented("async comprehensions"));
+                }
+                let target = self.parse_unpack_target(comp.target)?;
+                let iter = self.parse_expression(comp.iter)?;
+                let ifs = comp
+                    .ifs
+                    .into_iter()
+                    .map(|cond| self.parse_expression(cond))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Comprehension { target, iter, ifs })
             })
             .collect()
     }

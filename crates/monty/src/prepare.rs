@@ -5,8 +5,8 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     args::ArgExprs,
     expressions::{
-        Callable, CmpOperator, Expr, ExprLoc, Identifier, Literal, NameScope, Node, Operator, PreparedFunctionDef,
-        PreparedNode,
+        Callable, CmpOperator, Comprehension, Expr, ExprLoc, Identifier, Literal, NameScope, Node, Operator,
+        PreparedFunctionDef, PreparedNode, UnpackTarget,
     },
     fstring::{FStringPart, FormatSpec},
     intern::{InternerBuilder, StringId},
@@ -156,8 +156,8 @@ impl<'i> Prepare<'i> {
 
     /// Creates a new Prepare instance for function-level code.
     ///
-    /// Pre-populates `free_var_map` with nonlocal declarations and `cell_var_map` with
-    /// cell variables (excluding pass-through variables that are both nonlocal and cell).
+    /// Pre-populates `free_var_map` with nonlocal declarations and implicit captures,
+    /// and `cell_var_map` with cell variables (excluding pass-through variables).
     ///
     /// # Arguments
     /// * `capacity` - Expected number of nodes
@@ -165,6 +165,7 @@ impl<'i> Prepare<'i> {
     /// * `assigned_names` - Names that are assigned in this function (from first-pass scan)
     /// * `global_names` - Names declared as `global` in this function
     /// * `nonlocal_names` - Names declared as `nonlocal` in this function
+    /// * `implicit_captures` - Names captured from enclosing scope without explicit nonlocal
     /// * `global_name_map` - Copy of the module-level name map for global resolution
     /// * `enclosing_locals` - Names that exist as locals in the enclosing function (for nonlocal resolution)
     /// * `cell_var_names` - Names that are captured by nested functions (must be stored in cells)
@@ -176,6 +177,7 @@ impl<'i> Prepare<'i> {
         assigned_names: AHashSet<String>,
         global_names: AHashSet<String>,
         nonlocal_names: AHashSet<String>,
+        implicit_captures: AHashSet<String>,
         global_name_map: AHashMap<String, NamespaceId>,
         enclosing_locals: Option<AHashSet<String>>,
         cell_var_names: AHashSet<String>,
@@ -198,19 +200,26 @@ impl<'i> Prepare<'i> {
         let mut cell_var_map = AHashMap::with_capacity(cell_var_names.len());
         let mut namespace_size = namespace_size;
         for name in cell_var_names {
-            if !nonlocal_names.contains(&name) {
+            if !nonlocal_names.contains(&name) && !implicit_captures.contains(&name) {
                 let slot = namespace_size;
                 namespace_size += 1;
                 cell_var_map.insert(name, NamespaceId::new(slot));
             }
         }
 
-        // Pre-populate free_var_map with nonlocal declarations SECOND (after cell_vars).
+        // Pre-populate free_var_map with nonlocal declarations AND implicit captures SECOND (after cell_vars).
         // Each entry maps name -> namespace slot index where the cell reference will be stored.
         // NOTE: We intentionally do NOT add these to name_map here, because the nonlocal
         // validation in prepare_nodes checks name_map to detect "used before nonlocal declaration"
-        let mut free_var_map = AHashMap::with_capacity(nonlocal_names.len());
+        let free_var_capacity = nonlocal_names.len() + implicit_captures.len();
+        let mut free_var_map = AHashMap::with_capacity(free_var_capacity);
         for name in nonlocal_names {
+            let slot = namespace_size;
+            namespace_size += 1;
+            free_var_map.insert(name, NamespaceId::new(slot));
+        }
+        // Implicit captures (variables accessed from enclosing scope without explicit nonlocal)
+        for name in implicit_captures {
             let slot = namespace_size;
             namespace_size += 1;
             free_var_map.insert(name, NamespaceId::new(slot));
@@ -268,7 +277,6 @@ impl<'i> Prepare<'i> {
                                 Expr::Name(id) => {
                                     // Handle raising a variable - could be an exception type or instance.
                                     // The runtime will determine whether to call it (type) or raise it directly (instance).
-                                    // Don't error here if undefined - let runtime raise NameError with proper traceback.
                                     let position = id.position;
                                     let (resolved_id, _is_new) = self.get_id(id);
                                     Some(ExprLoc::new(position, Expr::Name(resolved_id)))
@@ -302,14 +310,10 @@ impl<'i> Prepare<'i> {
                     object,
                 } => {
                     let object = self.prepare_expression(object)?;
-                    // Track that each target name was assigned and resolve identifiers
+                    // Recursively resolve all targets (supports nested tuples)
                     let targets = targets
                         .into_iter()
-                        .map(|target| {
-                            self.names_assigned_in_order
-                                .insert(self.interner.get_str(target.name_id).to_string());
-                            self.get_id(target).0
-                        })
+                        .map(|target| self.prepare_unpack_target(target))
                         .collect();
                     new_nodes.push(Node::UnpackAssign {
                         targets,
@@ -354,11 +358,10 @@ impl<'i> Prepare<'i> {
                     body,
                     or_else,
                 } => {
-                    // Track that the loop variable is assigned
-                    self.names_assigned_in_order
-                        .insert(self.interner.get_str(target.name_id).to_string());
+                    // Prepare target with normal scoping (not comprehension isolation)
+                    let target = self.prepare_unpack_target(target);
                     new_nodes.push(Node::For {
-                        target: self.get_id(target).0,
+                        target,
                         iter: self.prepare_expression(iter)?,
                         body: self.prepare_nodes(body)?,
                         or_else: self.prepare_nodes(or_else)?,
@@ -593,6 +596,29 @@ impl<'i> Prepare<'i> {
                 body: Box::new(self.prepare_expression(*body)?),
                 orelse: Box::new(self.prepare_expression(*orelse)?),
             },
+            Expr::ListComp { elt, generators } => {
+                let (generators, elt, _) = self.prepare_comprehension(generators, Some(*elt), None)?;
+                Expr::ListComp {
+                    elt: Box::new(elt.expect("list comp must have elt")),
+                    generators,
+                }
+            }
+            Expr::SetComp { elt, generators } => {
+                let (generators, elt, _) = self.prepare_comprehension(generators, Some(*elt), None)?;
+                Expr::SetComp {
+                    elt: Box::new(elt.expect("set comp must have elt")),
+                    generators,
+                }
+            }
+            Expr::DictComp { key, value, generators } => {
+                let (generators, _, key_value) = self.prepare_comprehension(generators, None, Some((*key, *value)))?;
+                let (key, value) = key_value.expect("dict comp must have key/value");
+                Expr::DictComp {
+                    key: Box::new(key),
+                    value: Box::new(value),
+                    generators,
+                }
+            }
         };
 
         // Optimization: Transform `(x % n) == value` with any constant right-hand side into a
@@ -622,6 +648,225 @@ impl<'i> Prepare<'i> {
         }
 
         Ok(ExprLoc { position, expr })
+    }
+
+    /// Prepares a comprehension with scope isolation for loop variables.
+    ///
+    /// Comprehension loop variables are isolated from the enclosing scope - they do not
+    /// leak after the comprehension completes. CPython scoping rules require:
+    ///
+    /// 1. The FIRST generator's iter is evaluated in the enclosing scope
+    /// 2. ALL loop variables from ALL generators are then shadowed as local
+    /// 3. Subsequent generators' iters see all loop vars as local (even if unassigned)
+    ///
+    /// This means `[y for x in [1] for y in z for z in [[2]]]` raises UnboundLocalError
+    /// because `z` is treated as local (it's a loop var in generator 3) when evaluating
+    /// generator 2's iter.
+    ///
+    /// For list/set comprehensions, pass `elt` as Some and `key_value` as None.
+    /// For dict comprehensions, pass `elt` as None and `key_value` as Some((key, value)).
+    #[expect(clippy::type_complexity)]
+    fn prepare_comprehension(
+        &mut self,
+        generators: Vec<Comprehension>,
+        elt: Option<ExprLoc>,
+        key_value: Option<(ExprLoc, ExprLoc)>,
+    ) -> Result<(Vec<Comprehension>, Option<ExprLoc>, Option<(ExprLoc, ExprLoc)>), ParseError> {
+        // Save current scope state for isolation
+        let saved_name_map = self.name_map.clone();
+        let saved_assigned_names = self.names_assigned_in_order.clone();
+        let saved_free_var_map = self.free_var_map.clone();
+        let saved_cell_var_map = self.cell_var_map.clone();
+        let saved_enclosing_locals = self.enclosing_locals.clone();
+
+        // Step 1: Prepare first generator's iter in enclosing scope (before any shadowing)
+        let mut generators_iter = generators.into_iter();
+        let first_gen = generators_iter
+            .next()
+            .expect("comprehension must have at least one generator");
+        let first_iter = self.prepare_expression(first_gen.iter)?;
+
+        // Step 2: Collect and shadow ALL loop variable names from ALL generators.
+        // This must happen BEFORE evaluating any subsequent generator's iter expression.
+        // We allocate slots but don't mark them as "assigned" yet - this causes
+        // UnboundLocalError if a later generator's iter references an earlier-declared
+        // but not-yet-assigned loop variable.
+        let first_target = self.prepare_unpack_target_for_comprehension(first_gen.target);
+
+        // Collect remaining generators so we can pre-shadow their targets
+        let remaining_gens: Vec<Comprehension> = generators_iter.collect();
+
+        // Pre-shadow ALL remaining loop variables before evaluating their iters.
+        // This is the key CPython behavior: all loop vars are local to the comprehension,
+        // so referencing a later loop var in an earlier iter raises UnboundLocalError.
+        let mut preshadowed_targets: Vec<UnpackTarget> = Vec::with_capacity(remaining_gens.len());
+        for generator in &remaining_gens {
+            preshadowed_targets.push(self.prepare_unpack_target_shadow_only(generator.target.clone()));
+        }
+
+        // Prepare first generator's filters (can see first loop variable)
+        let first_ifs = first_gen
+            .ifs
+            .into_iter()
+            .map(|cond| self.prepare_expression(cond))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut prepared_generators = Vec::with_capacity(1 + remaining_gens.len());
+        prepared_generators.push(Comprehension {
+            target: first_target,
+            iter: first_iter,
+            ifs: first_ifs,
+        });
+
+        // Step 3: Process remaining generators - their iters now see all loop vars as local
+        for (generator, preshadowed_target) in remaining_gens.into_iter().zip(preshadowed_targets) {
+            let iter = self.prepare_expression(generator.iter)?;
+            let ifs = generator
+                .ifs
+                .into_iter()
+                .map(|cond| self.prepare_expression(cond))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            prepared_generators.push(Comprehension {
+                target: preshadowed_target,
+                iter,
+                ifs,
+            });
+        }
+
+        // Prepare the element expression(s) - can see all loop variables
+        let prepared_elt = match elt {
+            Some(e) => Some(self.prepare_expression(e)?),
+            None => None,
+        };
+        let prepared_key_value = match key_value {
+            Some((k, v)) => Some((self.prepare_expression(k)?, self.prepare_expression(v)?)),
+            None => None,
+        };
+
+        // Restore scope state - loop variables do not leak to enclosing scope
+        self.name_map = saved_name_map;
+        self.names_assigned_in_order = saved_assigned_names;
+        self.free_var_map = saved_free_var_map;
+        self.cell_var_map = saved_cell_var_map;
+        self.enclosing_locals = saved_enclosing_locals;
+
+        Ok((prepared_generators, prepared_elt, prepared_key_value))
+    }
+
+    /// Prepares an unpack target by resolving identifiers recursively.
+    ///
+    /// Handles both single identifiers and nested tuples like `(a, b), c`.
+    fn prepare_unpack_target(&mut self, target: UnpackTarget) -> UnpackTarget {
+        match target {
+            UnpackTarget::Name(ident) => {
+                self.names_assigned_in_order
+                    .insert(self.interner.get_str(ident.name_id).to_string());
+                UnpackTarget::Name(self.get_id(ident).0)
+            }
+            UnpackTarget::Tuple { targets, position } => {
+                let resolved_targets: Vec<UnpackTarget> = targets
+                    .into_iter()
+                    .map(|t| self.prepare_unpack_target(t)) // Recursive call
+                    .collect();
+                UnpackTarget::Tuple {
+                    targets: resolved_targets,
+                    position,
+                }
+            }
+        }
+    }
+
+    /// Prepares an unpack target for comprehension by allocating fresh namespace slots.
+    ///
+    /// Unlike regular unpack targets, comprehension targets need new slots to shadow
+    /// any existing bindings with the same name.
+    fn prepare_unpack_target_for_comprehension(&mut self, target: UnpackTarget) -> UnpackTarget {
+        match target {
+            UnpackTarget::Name(ident) => {
+                let name_str = self.interner.get_str(ident.name_id).to_string();
+                let comp_var_id = NamespaceId::new(self.namespace_size);
+                self.namespace_size += 1;
+
+                // Shadow any existing binding
+                self.shadow_for_comprehension(&name_str, comp_var_id);
+
+                UnpackTarget::Name(Identifier::new_with_scope(
+                    ident.name_id,
+                    ident.position,
+                    comp_var_id,
+                    NameScope::Local,
+                ))
+            }
+            UnpackTarget::Tuple { targets, position } => {
+                let resolved_targets: Vec<UnpackTarget> = targets
+                    .into_iter()
+                    .map(|t| self.prepare_unpack_target_for_comprehension(t)) // Recursive call
+                    .collect();
+                UnpackTarget::Tuple {
+                    targets: resolved_targets,
+                    position,
+                }
+            }
+        }
+    }
+
+    /// Pre-shadows an unpack target for comprehension scoping.
+    ///
+    /// Allocates namespace slots without marking as assigned, causing UnboundLocalError
+    /// if accessed before assignment.
+    fn prepare_unpack_target_shadow_only(&mut self, target: UnpackTarget) -> UnpackTarget {
+        match target {
+            UnpackTarget::Name(ident) => {
+                let name_str = self.interner.get_str(ident.name_id).to_string();
+                let comp_var_id = NamespaceId::new(self.namespace_size);
+                self.namespace_size += 1;
+
+                // Shadow but do NOT add to names_assigned_in_order yet
+                self.name_map.insert(name_str.clone(), comp_var_id);
+                self.free_var_map.remove(&name_str);
+                self.cell_var_map.remove(&name_str);
+                if let Some(ref mut enclosing) = self.enclosing_locals {
+                    enclosing.remove(&name_str);
+                }
+
+                UnpackTarget::Name(Identifier::new_with_scope(
+                    ident.name_id,
+                    ident.position,
+                    comp_var_id,
+                    NameScope::Local,
+                ))
+            }
+            UnpackTarget::Tuple { targets, position } => {
+                let resolved_targets: Vec<UnpackTarget> = targets
+                    .into_iter()
+                    .map(|t| self.prepare_unpack_target_shadow_only(t)) // Recursive call
+                    .collect();
+                UnpackTarget::Tuple {
+                    targets: resolved_targets,
+                    position,
+                }
+            }
+        }
+    }
+
+    /// Shadows a name in all scope maps for comprehension isolation.
+    ///
+    /// This ensures the comprehension loop variable takes precedence over any
+    /// variable with the same name from enclosing scopes.
+    fn shadow_for_comprehension(&mut self, name_str: &str, comp_var_id: NamespaceId) {
+        // The lookup order in get_id is: global_declarations, free_var_map, cell_var_map,
+        // assigned_names, enclosing_locals, then name_map. So we must update/remove from all maps
+        // checked before name_map to ensure the comprehension variable shadows any captured
+        // variable with the same name.
+        self.name_map.insert(name_str.to_string(), comp_var_id);
+        self.names_assigned_in_order.insert(name_str.to_string());
+        self.free_var_map.remove(name_str);
+        self.cell_var_map.remove(name_str);
+        // Also remove from enclosing_locals to prevent get_id from re-capturing the variable
+        if let Some(ref mut enclosing) = self.enclosing_locals {
+            enclosing.remove(name_str);
+        }
     }
 
     /// Prepares a function definition using a two-pass approach for correct scope resolution.
@@ -677,6 +922,15 @@ impl<'i> Prepare<'i> {
             locals
         };
 
+        // Filter potential_captures to get actual implicit captures.
+        // Only names that are ALSO in enclosing_locals are true implicit captures.
+        // Names NOT in enclosing_locals are either builtins or globals (handled at runtime).
+        let implicit_captures: AHashSet<String> = scope_info
+            .potential_captures
+            .into_iter()
+            .filter(|name| enclosing_locals.contains(name))
+            .collect();
+
         // Pass 2: Create child preparer for function body with scope info
         let mut inner_prepare = Prepare::new_function(
             body.len(),
@@ -684,6 +938,7 @@ impl<'i> Prepare<'i> {
             scope_info.assigned_names,
             scope_info.global_names,
             scope_info.nonlocal_names,
+            implicit_captures,
             global_name_map,
             Some(enclosing_locals),
             scope_info.cell_var_names,
@@ -847,19 +1102,32 @@ impl<'i> Prepare<'i> {
 
         // At module level, all names are local (which is also the global namespace)
         if self.is_module_scope {
-            let (id, is_new) = match self.name_map.entry(name_str.to_string()) {
-                Entry::Occupied(e) => (*e.get(), false),
+            return match self.name_map.entry(name_str.to_string()) {
+                Entry::Occupied(e) => {
+                    // Name already exists (from prior assignment or pre-registered)
+                    (
+                        Identifier::new_with_scope(ident.name_id, ident.position, *e.get(), NameScope::Local),
+                        false,
+                    )
+                }
                 Entry::Vacant(e) => {
                     let id = NamespaceId::new(self.namespace_size);
                     self.namespace_size += 1;
                     e.insert(id);
-                    (id, true)
+                    // Determine scope: if the name is assigned somewhere (even later in the file),
+                    // it's a true local that will raise UnboundLocalError if accessed before assignment.
+                    // If the name is never assigned, it's an undefined reference that raises NameError.
+                    let scope = if self.names_assigned_in_order.contains(name_str) {
+                        NameScope::Local
+                    } else {
+                        NameScope::LocalUnassigned
+                    };
+                    (
+                        Identifier::new_with_scope(ident.name_id, ident.position, id, scope),
+                        true,
+                    )
                 }
             };
-            return (
-                Identifier::new_with_scope(ident.name_id, ident.position, id, NameScope::Local),
-                is_new,
-            );
         }
 
         // In a function: determine scope based on global_names, nonlocal_names, assigned_names, global_name_map
@@ -979,7 +1247,10 @@ impl<'i> Prepare<'i> {
             );
         }
 
-        // 8. Name not found anywhere - resolve to local (will be NameError at runtime)
+        // 8. Name not found anywhere - allocate a local slot (will be NameError at runtime)
+        // This handles names that are only read (never assigned) and don't exist globally.
+        // We allocate a local slot that will never be written to.
+        // Mark as LocalUnassigned so runtime raises NameError (not UnboundLocalError).
         let (id, is_new) = match self.name_map.entry(name_str.to_string()) {
             Entry::Occupied(e) => (*e.get(), false),
             Entry::Vacant(e) => {
@@ -990,7 +1261,7 @@ impl<'i> Prepare<'i> {
             }
         };
         (
-            Identifier::new_with_scope(ident.name_id, ident.position, id, NameScope::Local),
+            Identifier::new_with_scope(ident.name_id, ident.position, id, NameScope::LocalUnassigned),
             is_new,
         )
     }
@@ -1032,7 +1303,6 @@ impl<'i> Prepare<'i> {
 ///
 /// This struct holds the scope-related information needed for the second pass
 /// of function preparation and for closure analysis.
-#[expect(clippy::struct_field_names)] // Field names are descriptive and consistent with Python terminology
 struct FunctionScopeInfo {
     /// Names declared as `global`
     global_names: AHashSet<String>,
@@ -1042,15 +1312,26 @@ struct FunctionScopeInfo {
     assigned_names: AHashSet<String>,
     /// Names that are captured by nested functions (must be stored in cells)
     cell_var_names: AHashSet<String>,
+    /// Names that are referenced but not local, global, or nonlocal.
+    /// These are POTENTIAL implicit captures - they may be captures from an enclosing function
+    /// OR they may be builtin/global reads. The actual implicit captures are determined
+    /// by filtering against enclosing_locals in new_function.
+    potential_captures: AHashSet<String>,
 }
 
-/// Scans a function body to collect scope information (first pass of two-pass preparation).
+/// Scans a function body to collect scope information (first phase of preparation).
 ///
-/// This function recursively walks the AST to find:
+/// This function performs three passes over the AST:
+/// 1. Collect global, nonlocal, and assigned names
+/// 2. Identify cell_vars (names captured by nested functions)
+/// 3. Collect potential implicit captures (referenced but not local/global/nonlocal)
+///
+/// The collected information includes:
 /// - Names declared as `global` (from Global statements)
 /// - Names declared as `nonlocal` (from Nonlocal statements)
 /// - Names that are assigned (from Assign, OpAssign, For targets, etc.)
 /// - Names that are captured by nested functions (cell_var_names)
+/// - Names that might be captured from enclosing scope (potential_captures)
 ///
 /// This information is used to determine whether each name reference should resolve
 /// to the local namespace, global namespace, or an enclosing scope via cells.
@@ -1063,6 +1344,7 @@ fn collect_function_scope_info(
     let mut nonlocal_names = AHashSet::new();
     let mut assigned_names = AHashSet::new();
     let mut cell_var_names = AHashSet::new();
+    let mut referenced_names = AHashSet::new();
 
     // First pass: collect global, nonlocal, and assigned names
     for node in nodes {
@@ -1076,9 +1358,14 @@ fn collect_function_scope_info(
     }
 
     // Build the set of our locals: params + assigned_names (excluding globals)
-    let our_locals: AHashSet<String> = params
+    let param_names: AHashSet<String> = params
         .iter()
         .map(|string_id| interner.get_str(*string_id).to_string())
+        .collect();
+
+    let our_locals: AHashSet<String> = param_names
+        .iter()
+        .cloned()
         .chain(assigned_names.iter().cloned())
         .filter(|name| !global_names.contains(name))
         .collect();
@@ -1088,11 +1375,31 @@ fn collect_function_scope_info(
         collect_cell_vars_from_node(node, &our_locals, &mut cell_var_names, interner);
     }
 
+    // Third pass: collect all referenced names to identify potential implicit captures.
+    // These are names that might be captured from an enclosing function scope.
+    // We can't fully determine implicit captures here because we don't know yet what
+    // the enclosing scope's locals are - that's determined later when we call new_function.
+    for node in nodes {
+        collect_referenced_names_from_node(node, &mut referenced_names, interner);
+    }
+
+    // Potential implicit captures are names that are:
+    // - Referenced in the function body
+    // - Not local (not params, not assigned)
+    // - Not declared global
+    // - Not declared nonlocal (those are handled separately)
+    // The actual implicit captures will be filtered against enclosing_locals in new_function.
+    let potential_captures: AHashSet<String> = referenced_names
+        .into_iter()
+        .filter(|name| !our_locals.contains(name) && !global_names.contains(name) && !nonlocal_names.contains(name))
+        .collect();
+
     FunctionScopeInfo {
         global_names,
         nonlocal_names,
         assigned_names,
         cell_var_names,
+        potential_captures,
     }
 }
 
@@ -1119,8 +1426,9 @@ fn collect_scope_info_from_node(
             assigned_names.insert(interner.get_str(target.name_id).to_string());
         }
         Node::UnpackAssign { targets, .. } => {
+            // Recursively collect all names from nested unpack targets
             for target in targets {
-                assigned_names.insert(interner.get_str(target.name_id).to_string());
+                collect_names_from_unpack_target(target, assigned_names, interner);
             }
         }
         Node::OpAssign { target, .. } => {
@@ -1135,8 +1443,8 @@ fn collect_scope_info_from_node(
         Node::For {
             target, body, or_else, ..
         } => {
-            // For loop target is assigned
-            assigned_names.insert(interner.get_str(target.name_id).to_string());
+            // For loop target is assigned - collect all names from the target
+            collect_names_from_unpack_target(target, assigned_names, interner);
             // Recurse into body and else
             for n in body {
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
@@ -1425,6 +1733,69 @@ fn collect_referenced_names_from_expr(
             collect_referenced_names_from_expr(body, referenced, interner);
             collect_referenced_names_from_expr(orelse, referenced, interner);
         }
+        Expr::ListComp { elt, generators } | Expr::SetComp { elt, generators } => {
+            collect_referenced_names_from_comprehension(generators, Some(elt), None, referenced, interner);
+        }
+        Expr::DictComp { key, value, generators } => {
+            collect_referenced_names_from_comprehension(generators, None, Some((key, value)), referenced, interner);
+        }
+    }
+}
+
+/// Collects referenced names from comprehension expressions.
+///
+/// Handles the special scoping rules: loop variables are local to the comprehension,
+/// so we collect references from iterators and conditions but exclude loop variable names.
+fn collect_referenced_names_from_comprehension(
+    generators: &[Comprehension],
+    elt: Option<&ExprLoc>,
+    key_value: Option<(&ExprLoc, &ExprLoc)>,
+    referenced: &mut AHashSet<String>,
+    interner: &InternerBuilder,
+) {
+    // Track loop variable names (these are local to the comprehension)
+    let mut comp_locals: AHashSet<String> = AHashSet::new();
+
+    // Collect references from expressions that can see prior loop variables.
+    // These need to be filtered against comp_locals before adding to referenced.
+    let mut inner_refs: AHashSet<String> = AHashSet::new();
+
+    for (i, comp) in generators.iter().enumerate() {
+        if i == 0 {
+            // FIRST generator's iter expression truly references enclosing scope
+            // (evaluated before any loop variable is defined).
+            collect_referenced_names_from_expr(&comp.iter, referenced, interner);
+        } else {
+            // SUBSEQUENT generators' iter expressions can reference prior loop variables.
+            // For example, in `[y for x in xs for y in x]`, the `x` in the second
+            // generator's iter is the first generator's loop variable, not outer scope.
+            collect_referenced_names_from_expr(&comp.iter, &mut inner_refs, interner);
+        }
+
+        // Add this generator's target(s) to local set
+        collect_names_from_unpack_target(&comp.target, &mut comp_locals, interner);
+
+        // Filter conditions can see prior loop variables - collect separately
+        for cond in &comp.ifs {
+            collect_referenced_names_from_expr(cond, &mut inner_refs, interner);
+        }
+    }
+
+    // Element expression(s) can see all loop variables - collect separately
+    if let Some(e) = elt {
+        collect_referenced_names_from_expr(e, &mut inner_refs, interner);
+    }
+    if let Some((k, v)) = key_value {
+        collect_referenced_names_from_expr(k, &mut inner_refs, interner);
+        collect_referenced_names_from_expr(v, &mut inner_refs, interner);
+    }
+
+    // Add inner references that are NOT comprehension-locals to the outer referenced set.
+    // Names that ARE comp_locals refer to the comprehension's loop variable, not enclosing scope.
+    for name in inner_refs {
+        if !comp_locals.contains(&name) {
+            referenced.insert(name);
+        }
     }
 }
 
@@ -1465,6 +1836,22 @@ fn collect_referenced_names_from_fstring_parts(
             // Also check dynamic format specs which can contain interpolated expressions
             if let Some(FormatSpec::Dynamic(spec_parts)) = format_spec {
                 collect_referenced_names_from_fstring_parts(spec_parts, referenced, interner);
+            }
+        }
+    }
+}
+
+/// Collects all names from an unpack target into the given set.
+///
+/// Recursively traverses nested tuples to find all identifier names.
+fn collect_names_from_unpack_target(target: &UnpackTarget, names: &mut AHashSet<String>, interner: &InternerBuilder) {
+    match target {
+        UnpackTarget::Name(ident) => {
+            names.insert(interner.get_str(ident.name_id).to_string());
+        }
+        UnpackTarget::Tuple { targets, .. } => {
+            for t in targets {
+                collect_names_from_unpack_target(t, names, interner);
             }
         }
     }
