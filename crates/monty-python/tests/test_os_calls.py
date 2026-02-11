@@ -5,6 +5,7 @@ with the right function name and arguments, and that return values from
 the host are properly converted and used by Monty code.
 """
 
+import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -278,6 +279,57 @@ def test_os_basic():
 
     assert result is True
     assert calls == snapshot([('Path.exists', (PurePosixPath('/tmp/test.txt'),))])
+
+
+# =============================================================================
+# datetime.now/date.today OS call integration
+# =============================================================================
+
+
+def test_datetime_now_yields_oscall():
+    m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
+    result = m.start()
+
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert result.is_os_function is True
+    assert result.function_name == snapshot('datetime.now')
+    assert result.args == snapshot(())
+    assert result.kwargs == snapshot({})
+
+
+def test_datetime_now_resume_returns_native_datetime():
+    code = 'import datetime; datetime.datetime.now(datetime.timezone.utc)'
+    m = pydantic_monty.Monty(code)
+    result = m.start()
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+
+    resumed = result.resume(return_value=(1_700_000_000.0, 0))
+    assert isinstance(resumed, pydantic_monty.MontyComplete)
+    assert resumed.output == snapshot(datetime.datetime(2023, 11, 14, 22, 13, 20, tzinfo=datetime.timezone.utc))
+
+
+def test_datetime_now_resume_payload_used_in_arithmetic():
+    code = """
+import datetime
+base = datetime.datetime.now(datetime.timezone.utc)
+(base + datetime.timedelta(hours=2)) - base
+"""
+    m = pydantic_monty.Monty(code)
+    result = m.start()
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+    resumed = result.resume(return_value=(1_700_000_000.0, 0))
+    assert isinstance(resumed, pydantic_monty.MontyComplete)
+    assert resumed.output == snapshot(datetime.timedelta(hours=2))
+
+
+def test_date_today_resume_returns_native_date():
+    m = pydantic_monty.Monty('import datetime; datetime.date.today()')
+    result = m.start()
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert result.function_name == snapshot('datetime.now')
+    resumed = result.resume(return_value=(1_700_000_000.0, 0))
+    assert isinstance(resumed, pydantic_monty.MontyComplete)
+    assert resumed.output == snapshot(datetime.date(2023, 11, 14))
 
 
 def test_os_stat():

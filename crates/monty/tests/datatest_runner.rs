@@ -816,7 +816,7 @@ fn dispatch_os_call(
         return MontyObject::Dict(env_dict.into()).into();
     }
     if function == OsFunction::DateTimeNow {
-        // Deterministic `(timestamp_utc, local_offset_seconds)` payload.
+        // Deterministic fixture for datetime/date "now" tests.
         return MontyObject::Tuple(vec![MontyObject::Float(VFS_MTIME), MontyObject::Int(0)]).into();
     }
 

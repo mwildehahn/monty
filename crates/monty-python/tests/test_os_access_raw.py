@@ -178,6 +178,10 @@ class TestOS(AbstractOS):
             'HOME': '/test/home',
         }
 
+    def datetime_now(self) -> tuple[float, int]:
+        """Return deterministic wall-clock data for datetime OS callback tests."""
+        return (1_700_000_000.0, 0)
+
 
 # =============================================================================
 # Basic AbstractFileSystem tests

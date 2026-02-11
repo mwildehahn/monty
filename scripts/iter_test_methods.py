@@ -11,6 +11,7 @@ This module is shared between:
 
 from __future__ import annotations
 
+import datetime as datetime_module
 import os
 import stat as stat_module
 from dataclasses import dataclass
@@ -457,6 +458,81 @@ def _virtual_getenv(key: str, default: str | None = None) -> str | None:
 
 # Monkey-patch os.getenv to use virtual environment for test keys
 os.getenv = _virtual_getenv
+
+
+# =============================================================================
+# Deterministic datetime.now/date.today for # call-external tests
+# =============================================================================
+
+_FIXED_TIMESTAMP_UTC = 1_700_000_000.0
+_FIXED_LOCAL_OFFSET_SECONDS = 0
+_ORIGINAL_DATE_CLASS = datetime_module.date
+_ORIGINAL_DATETIME_CLASS = datetime_module.datetime
+
+
+class _VirtualDate(datetime_module.date):
+    def __repr__(self) -> str:
+        return f'datetime.date({self.year}, {self.month}, {self.day})'
+
+    @classmethod
+    def today(cls) -> '_VirtualDate':
+        local_ts = _FIXED_TIMESTAMP_UTC + _FIXED_LOCAL_OFFSET_SECONDS
+        # Use UTC conversion to keep fixtures deterministic across host timezones.
+        local_dt = _ORIGINAL_DATETIME_CLASS.fromtimestamp(local_ts, tz=datetime_module.timezone.utc).replace(
+            tzinfo=None
+        )
+        return cls(local_dt.year, local_dt.month, local_dt.day)
+
+
+class _VirtualDateTime(datetime_module.datetime):
+    def __repr__(self) -> str:
+        base = _ORIGINAL_DATETIME_CLASS(
+            self.year,
+            self.month,
+            self.day,
+            self.hour,
+            self.minute,
+            self.second,
+            self.microsecond,
+            tzinfo=self.tzinfo,
+        )
+        return repr(base)
+
+    @classmethod
+    def now(cls, tz: datetime_module.tzinfo | None = None) -> '_VirtualDateTime':
+        if tz is None:
+            local_ts = _FIXED_TIMESTAMP_UTC + _FIXED_LOCAL_OFFSET_SECONDS
+            # Use UTC conversion so "local wall time" is controlled only by the
+            # fixed offset fixture, not by the machine timezone.
+            local_dt = _ORIGINAL_DATETIME_CLASS.fromtimestamp(local_ts, tz=datetime_module.timezone.utc).replace(
+                tzinfo=None
+            )
+            return cls(
+                local_dt.year,
+                local_dt.month,
+                local_dt.day,
+                local_dt.hour,
+                local_dt.minute,
+                local_dt.second,
+                local_dt.microsecond,
+            )
+
+        aware_dt = _ORIGINAL_DATETIME_CLASS.fromtimestamp(_FIXED_TIMESTAMP_UTC, tz=tz)
+        return cls(
+            aware_dt.year,
+            aware_dt.month,
+            aware_dt.day,
+            aware_dt.hour,
+            aware_dt.minute,
+            aware_dt.second,
+            aware_dt.microsecond,
+            tzinfo=aware_dt.tzinfo,
+        )
+
+
+# Patch datetime module classes so tests see deterministic values.
+datetime_module.date = _VirtualDate
+datetime_module.datetime = _VirtualDateTime
 
 
 class VirtualEnviron:
