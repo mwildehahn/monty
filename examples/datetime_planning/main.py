@@ -1,9 +1,9 @@
 """Datetime planning example using Monty's phase-1 datetime support.
 
 This script runs datetime calculations inside the Monty sandbox and prints:
-- current local date (`date.today()`)
-- local time in one hour (`datetime.now() + timedelta(hours=1)`)
-- next Thursday at 3pm local time
+- current date in fixed-offset PST (`datetime.now(pst)`)
+- time in one hour in fixed-offset PST
+- next Thursday at 3pm in fixed-offset PST
 - first Monday of next month
 """
 
@@ -18,14 +18,14 @@ MONTY_CODE = """
 import datetime
 
 
-def parse_date(iso_date):
+def parse_date_yyyy_mm_dd(iso_date):
     year = int(iso_date[0:4])
     month = int(iso_date[5:7])
     day = int(iso_date[8:10])
     return year, month, day
 
 
-def parse_time(iso_datetime):
+def parse_time_hh_mm_ss(iso_datetime):
     hour = int(iso_datetime[11:13])
     minute = int(iso_datetime[14:16])
     second = int(iso_datetime[17:19])
@@ -49,15 +49,15 @@ def weekday_monday_zero(year, month, day):
     return (weekday_sunday_zero + 6) % 7
 
 
-today = datetime.date.today()
-now_local = datetime.datetime.now()
-in_one_hour = now_local + datetime.timedelta(hours=1)
+pst = datetime.timezone(datetime.timedelta(hours=-8), 'PST')
+now_pst = datetime.datetime.now(pst)
+in_one_hour = now_pst + datetime.timedelta(hours=1)
 
-today_iso = str(today)
-now_iso = str(now_local)
-
-year, month, day = parse_date(today_iso)
-current_hour, _current_minute, _current_second = parse_time(now_iso)
+now_pst_iso = str(now_pst)
+today_iso = now_pst_iso[0:10]
+year, month, day = parse_date_yyyy_mm_dd(today_iso)
+today = datetime.date(year, month, day)
+current_hour, _current_minute, _current_second = parse_time_hh_mm_ss(now_pst_iso)
 
 today_weekday = weekday_monday_zero(year, month, day)
 # Monday=0, Thursday=3
@@ -67,8 +67,8 @@ if next_thursday_days == 0 and current_hour >= 15:
 
 next_thursday_date = today + datetime.timedelta(days=next_thursday_days)
 next_thursday_iso = str(next_thursday_date)
-next_year, next_month, next_day = parse_date(next_thursday_iso)
-next_thursday_3pm = datetime.datetime(next_year, next_month, next_day, 15, 0, 0)
+next_year, next_month, next_day = parse_date_yyyy_mm_dd(next_thursday_iso)
+next_thursday_3pm = datetime.datetime(next_year, next_month, next_day, 15, 0, 0, 0, pst)
 
 if month == 12:
     first_year = year + 1
@@ -87,6 +87,7 @@ first_monday_next_month = first_of_next_month + datetime.timedelta(days=first_mo
     'in_one_hour': str(in_one_hour),
     'next_thursday_3pm': str(next_thursday_3pm),
     'first_monday_next_month': str(first_monday_next_month),
+    'timezone': 'PST (fixed offset -08:00)',
 }
 """
 
@@ -98,6 +99,7 @@ def main() -> None:
     result = cast(dict[str, str], result_any)
 
     print('Datetime planning from Monty:')
+    print(f'timezone: {result["timezone"]}')
     print(f'today: {result["today"]}')
     print(f'in_one_hour: {result["in_one_hour"]}')
     print(f'next_thursday_3pm: {result["next_thursday_3pm"]}')
