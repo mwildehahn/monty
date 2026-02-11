@@ -1,11 +1,5 @@
 import sys
 import types
-from collections.abc import Callable, Generator, Iterator, Sequence
-from io import BufferedRandom, BufferedReader, BufferedWriter, FileIO, TextIOWrapper
-from os import PathLike, stat_result
-from types import GenericAlias, TracebackType
-from typing import IO, Any, BinaryIO, ClassVar, Literal, TypeVar, overload
-
 from _typeshed import (
     OpenBinaryMode,
     OpenBinaryModeReading,
@@ -17,6 +11,11 @@ from _typeshed import (
     StrPath,
     Unused,
 )
+from collections.abc import Callable, Generator, Iterator, Sequence
+from io import BufferedRandom, BufferedReader, BufferedWriter, FileIO, TextIOWrapper
+from os import PathLike, stat_result
+from types import GenericAlias, TracebackType
+from typing import IO, Any, BinaryIO, ClassVar, Literal, TypeVar, overload
 from typing_extensions import Never, Self, deprecated
 
 _PathT = TypeVar('_PathT', bound=PurePath)

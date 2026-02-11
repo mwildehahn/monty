@@ -71,6 +71,9 @@ known-first-party = ["pydantic_monty"]
 "crates/monty-typeshed/vendor/typeshed/stdlib/**/*.pyi" = [
     "F403", # unable to detect undefined names
     "F821", # Undefined name
+    "F401", # Vendored stubs intentionally import names for type-checker compatibility
+    "I001", # Preserve upstream import ordering in vendored typeshed
+    "RUF100", # Vendored stubs use noqa codes not recognized by this Ruff configuration
 ]
 "crates/monty-type-checking/tests/good_types.py" = [
     "F704", # await outside function - needed for testing top-level async/await

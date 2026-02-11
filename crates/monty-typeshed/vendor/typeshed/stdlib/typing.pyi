@@ -3,7 +3,16 @@
 # https://github.com/python/mypy/issues/16744
 import collections  # noqa: F401  # pyright: ignore[reportUnusedImport]
 import sys
+import typing_extensions
 from _collections_abc import dict_items, dict_keys, dict_values
+from _typeshed import (
+    IdentityFunction,
+    ReadableBuffer,
+    SupportsGetItem,
+    SupportsGetItemViewable,
+    SupportsKeysAndGetItem,
+    Viewable,
+)
 from abc import ABCMeta, abstractmethod
 from re import Match as Match, Pattern as Pattern
 from types import (
@@ -18,20 +27,11 @@ from types import (
     TracebackType,
     WrapperDescriptorType,
 )
-
-import typing_extensions
-from _typeshed import (
-    IdentityFunction,
-    ReadableBuffer,
-    SupportsGetItem,
-    SupportsGetItemViewable,
-    SupportsKeysAndGetItem,
-    Viewable,
-)
 from typing_extensions import Never as _Never, ParamSpec as _ParamSpec, deprecated
 
 if sys.version_info >= (3, 14):
     from _typeshed import EvaluateFunc
+
     from annotationlib import Format
 
 if sys.version_info >= (3, 10):
@@ -456,7 +456,7 @@ OrderedDict = _Alias()
 Annotated: _SpecialForm
 
 # Predefined type variables.
-AnyStr = TypeVar('AnyStr', str, bytes)
+AnyStr = TypeVar('AnyStr', str, bytes)  # noqa: Y001
 
 @type_check_only
 class _Generic:
@@ -951,7 +951,7 @@ ByteString: typing_extensions.TypeAlias = bytes | bytearray | memoryview
 
 # Functions
 
-_get_type_hints_obj_allowed_types: typing_extensions.TypeAlias = (
+_get_type_hints_obj_allowed_types: typing_extensions.TypeAlias = (  # noqa: Y042
     object
     | Callable[..., Any]
     | FunctionType

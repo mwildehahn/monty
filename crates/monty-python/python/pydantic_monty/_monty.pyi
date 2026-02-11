@@ -85,7 +85,7 @@ class Monty:
         limits: ResourceLimits | None = None,
         external_functions: dict[str, Callable[..., Any]] | None = None,
         print_callback: Callable[[Literal['stdout'], str], None] | None = None,
-        os: Callable[[OsFunction, tuple[Any, ...]], Any] | None = None,
+        os: Callable[[OsFunction, tuple[Any, ...], dict[str, Any]], Any] | None = None,
     ) -> Any:
         """
         Execute the code and return the result.
@@ -98,9 +98,10 @@ class Monty:
             external_functions: Dict of external function callbacks (must match names from __init__)
             print_callback: Optional callback for print output
             os: Optional callback for OS calls.
-                Called with (function_name, args) where function_name is like 'Path.exists'
-                and args is a tuple of arguments. Must return the appropriate value for the
-                OS function (e.g., bool for exists(), stat_result for stat()).
+                Called with (function_name, args, kwargs) where function_name is like
+                'Path.exists' or 'datetime.now'. Must return the appropriate value for the
+                OS function (e.g., bool for exists(), stat_result for stat(), or a
+                (timestamp_utc, local_offset_seconds) tuple for datetime.now).
 
         Returns:
             The result of the last expression in the code
