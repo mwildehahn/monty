@@ -332,6 +332,117 @@ os.getenv('PATH')
 }
 
 #[test]
+fn datetime_now_yields_oscall_without_args() {
+    let code = r"
+import datetime
+datetime.datetime.now()
+";
+    let (func, args) = run_to_oscall(code);
+    assert_eq!(func, OsFunction::DateTimeNow);
+    assert!(args.is_empty(), "datetime.now OS callback should expose no args");
+}
+
+#[test]
+fn date_today_yields_oscall_without_args() {
+    let code = r"
+import datetime
+datetime.date.today()
+";
+    let (func, args) = run_to_oscall(code);
+    assert_eq!(func, OsFunction::DateTimeNow);
+    assert!(args.is_empty(), "date.today OS callback should expose no args");
+}
+
+#[test]
+fn datetime_now_resume_payload_converts_to_datetime() {
+    let code = r"
+import datetime
+datetime.datetime.now(datetime.timezone.utc)
+";
+    let (func, args, result) = run_oscall_with_result(
+        code,
+        MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
+    );
+
+    assert_eq!(func, OsFunction::DateTimeNow);
+    assert!(args.is_empty(), "datetime.now OS callback should expose no args");
+    assert_eq!(
+        result,
+        MontyObject::DateTime {
+            year: 2023,
+            month: 11,
+            day: 14,
+            hour: 22,
+            minute: 13,
+            second: 20,
+            microsecond: 0,
+            offset_seconds: Some(0),
+        }
+    );
+}
+
+#[test]
+fn date_today_resume_payload_converts_to_date() {
+    let code = r"
+import datetime
+datetime.date.today()
+";
+    let (func, args, result) = run_oscall_with_result(
+        code,
+        MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
+    );
+
+    assert_eq!(func, OsFunction::DateTimeNow);
+    assert!(args.is_empty(), "date.today OS callback should expose no args");
+    assert_eq!(
+        result,
+        MontyObject::Date {
+            year: 2023,
+            month: 11,
+            day: 14,
+        }
+    );
+}
+
+#[test]
+fn date_today_resume_payload_survives_snapshot_roundtrip() {
+    let runner = MontyRun::new(
+        "import datetime\ndatetime.date.today()".to_owned(),
+        "test.py",
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let progress = runner.start(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let bytes = progress.dump().unwrap();
+    let progress = RunProgress::<NoLimitTracker>::load(&bytes).unwrap();
+    let RunProgress::OsCall {
+        function, args, state, ..
+    } = progress
+    else {
+        panic!("expected OsCall");
+    };
+    assert_eq!(function, OsFunction::DateTimeNow);
+    assert!(args.is_empty());
+
+    let resumed = state
+        .run(
+            MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
+            &mut StdPrint,
+        )
+        .unwrap();
+    let output = resumed.into_complete().expect("expected completion");
+    assert_eq!(
+        output,
+        MontyObject::Date {
+            year: 2023,
+            month: 11,
+            day: 14,
+        }
+    );
+}
+
+#[test]
 fn os_getenv_with_default() {
     let code = r"
 import os
