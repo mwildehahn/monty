@@ -9,6 +9,27 @@ Implement a secure, minimal `datetime` feature set in Monty that enables:
 
 This phase intentionally avoids broad stdlib parity and focuses on a small, defensible vertical slice.
 
+## Progress Log (2026-02-11)
+1. `[x]` Core runtime wiring complete:
+- `datetime` module, interned names, builtin type registration, heap variants, and type exports integrated.
+2. `[x]` Datetime type behavior complete:
+- `date`, `datetime`, `timedelta`, and `timezone` constructors/classmethods/arithmetic/comparisons/repr-str implemented.
+3. `[x]` VM + OS callback path complete:
+- `call_type_method` refactor landed; `date.today()`/`datetime.now()` issue `DateTimeNow` OS calls and resume payload conversion works.
+4. `[x]` Python binding/model integration complete:
+- `MontyObject` datetime variants added; Rust↔Python conversion supports native datetime/date/timedelta/timezone objects.
+5. `[x]` Typeshed/type-checking integration complete:
+- Custom `datetime.pyi` added, vendor refresh integrated, and type-checking tests updated.
+6. `[x]` Deterministic test harness complete:
+- Datatest OS dispatcher + CPython iter shim updated for deterministic `datetime.now`/`date.today`.
+7. `[x]` Validation complete:
+- `make lint-rs`, `make lint-py`, `make test-cases`, `cargo test -p monty --test os_tests`, and targeted pytest OS files pass.
+
+### Progress Note
+- Timezone validation was aligned to current CPython behavior discovered during implementation:
+  - second-level fixed offsets are accepted (not minute-only),
+  - allowed range is strictly within ±24 hours.
+
 ## Constraints and Requirements
 1. All current-time reads must go through an OS callback (same trust model as `os.environ`).
 2. `date.today()` must be derived from the same `now` source as `datetime.now()`.
