@@ -24,24 +24,35 @@ This phase intentionally avoids broad stdlib parity and focuses on a small, defe
 - `datetime.datetime`
 - `datetime.timedelta`
 - `datetime.timezone` (fixed offset only)
-3. Constructors and classmethods:
+3. Constants:
+- `datetime.timezone.utc` (class attribute, equivalent to `timezone(timedelta(0))`)
+4. Constructors and classmethods:
 - `date(year, month, day)`
 - `datetime(year, month, day, hour=0, minute=0, second=0, microsecond=0, tzinfo=None)`
 - `timedelta(days=0, seconds=0, microseconds=0, milliseconds=0, minutes=0, hours=0, weeks=0)`
 - `timezone(offset, name=None)`
 - `date.today()`
 - `datetime.now(tz=None)`
-4. Arithmetic:
+5. Arithmetic:
 - `datetime +/- timedelta`
 - `datetime - datetime -> timedelta`
 - `date +/- timedelta`
 - `date - date -> timedelta`
 - `timedelta +/- timedelta`
 - unary `-timedelta`
-5. Basic comparisons:
+- `timedelta` bounds enforced: `-999999999 <= days <= 999999999` (matches CPython, prevents unbounded arithmetic chains)
+6. Basic comparisons:
 - same-type comparisons for `date`, `datetime`, `timedelta`
 - enforce aware/naive rules for `datetime` subtraction/comparison
-6. `timedelta.total_seconds()`.
+7. `timedelta.total_seconds()`.
+8. `__repr__` and `__str__` output must match CPython exactly:
+- `date.__repr__`: `datetime.date(2024, 1, 15)`
+- `date.__str__`: `2024-01-15`
+- `datetime.__repr__`: `datetime.datetime(2024, 1, 15, 10, 30)` (omits trailing zeros)
+- `datetime.__str__`: `2024-01-15 10:30:00`
+- `timedelta.__repr__`: `datetime.timedelta(days=1, seconds=3600)`
+- `timedelta.__str__`: `1 day, 1:00:00`
+- `timezone.__repr__`: `datetime.timezone.utc` or `datetime.timezone(datetime.timedelta(seconds=3600))`
 
 ## Explicit Non-Goals (Phase 1)
 1. `time.time()` implementation (contract prepared, implementation deferred).
@@ -55,38 +66,45 @@ This phase intentionally avoids broad stdlib parity and focuses on a small, defe
 Add `OsFunction::DateTimeNow` serialized as `datetime.now`.
 
 ### Callback arguments
-Use a single callback shape for all "current time" use cases:
 - Function name: `datetime.now`
 - Positional args:
-  1. `mode: str` where `mode in {'datetime', 'date', 'timestamp'}`
-  2. `offset_seconds: int | None` (requested fixed offset; `None` means local/default host policy)
+  1. `offset_seconds: int | None` (requested fixed offset; `None` means "use host local time")
 - Keyword args: none for phase 1.
 
-### Callback return values (phase 1)
-1. For `mode='datetime'` or `mode='date'`: return Unix timestamp as float seconds (`float`).
-2. For future `mode='timestamp'`: same float seconds contract.
+Note: `mode` was considered but dropped — all callers (`datetime.now()`, `date.today()`, future `time.time()`) need the same thing: a Unix timestamp. Monty decides what to construct from it. If a future use case needs different host behavior, a new `OsFunction` variant can be added.
 
-Monty-side conversion:
-1. If `tz=None`, interpret returned timestamp in host local/default policy for now.
-2. If `tz=timezone(...)`, apply provided fixed offset on Monty side.
-3. `date.today()` computes date from the same timestamp source via `datetime.now` callback path.
+### Callback return values (phase 1)
+Return Unix timestamp as float seconds (`float`). The host always returns the same value regardless of caller.
+
+### Monty-side conversion
+1. If `tz=None`: the host returns a timestamp representing local time as-if UTC (i.e., the host applies the local UTC offset before returning). Monty constructs a **naive** datetime from this timestamp by treating it as UTC civil time. This matches CPython's `datetime.now()` behavior where the result is a naive datetime with local wall-clock values.
+2. If `tz=timezone(offset)`: the host returns a UTC timestamp. Monty applies the fixed offset on its side to produce an **aware** datetime.
+3. `date.today()` calls the same callback with `offset_seconds=None`, then extracts only the date portion.
 
 ### Why this contract
 1. Single source of truth for "now".
-2. Reuses cleanly for future `time.time()`.
+2. Reuses cleanly for future `time.time()` (same callback, Monty just returns the float directly).
 3. Keeps host API simple and deterministic for tests.
 
 ## Runtime Data Model
 Implement new heap types in `crates/monty/src/types/`:
 1. `Date`
-- Stored as validated civil date components and/or days-from-epoch.
+- Stored as proleptic Gregorian ordinal (days from epoch, single `i32`).
+- Civil components `(year, month, day)` derived on demand for display/construction validation.
+- Ordinal form makes arithmetic trivial (`date + timedelta` = ordinal addition) and comparison is integer comparison.
 2. `DateTime`
-- Stored as UTC instant plus optional fixed offset metadata (for aware values).
-- Naive datetimes represented without offset.
+- **Aware**: stored as UTC epoch microseconds (`i64`) + offset seconds (`i32`). Comparison/arithmetic operates on UTC microseconds directly.
+- **Naive**: stored as civil epoch microseconds (`i64`) with **no UTC semantics** — the value represents wall-clock time with no zone. A sentinel value (e.g., `offset = None` or a separate enum variant) distinguishes naive from aware.
+- This distinction is critical: naive and aware datetimes must never be compared or subtracted (CPython raises `TypeError`), and conflating them by storing both as "UTC microseconds" would mask bugs.
 3. `TimeDelta`
-- Stored as normalized `(days, seconds, microseconds)` semantics.
+- Stored as normalized `(days: i32, seconds: i32, microseconds: i32)` matching CPython's internal representation.
+- Invariants: `0 <= seconds < 86400`, `0 <= microseconds < 1_000_000`.
+- Bounds enforced: `-999999999 <= days <= 999999999` (matches CPython). `OverflowError` on violation.
 4. `TimeZone`
-- Stored as fixed offset seconds and optional display name.
+- Stored as fixed offset seconds (`i32`) and optional display name (`Option<StringId>`).
+- Offset range: `-86340 <= offset_seconds <= 86340` (matching CPython's `timedelta(hours=23, minutes=59)` limit). `ValueError` on violation.
+
+All four types are immutable and contain no heap references, so `is_gc_tracked()` returns `false`.
 
 Representation must make arithmetic/comparison cheap and deterministic.
 
@@ -95,6 +113,10 @@ Representation must make arithmetic/comparison cheap and deterministic.
 2. Keep parsing/formatting layer isolated so `speedate` can be added in phase 2 for CPython-style parsing behavior.
 
 ## Core Implementation Tasks
+
+### Task dependency order
+Tasks 1-2 (wiring + type system) → Task 5 (OS enum) → Task 3 (behavior) → Task 4 (VM call-path) → Task 6 (arithmetic) → Task 7 (exceptions used throughout, but helpers should be added as needed during tasks 3-6).
+
 ### 1) Module and symbol wiring
 1. Add `datetime` module support in:
 - `crates/monty/src/modules/mod.rs`
@@ -119,8 +141,9 @@ Representation must make arithmetic/comparison cheap and deterministic.
 3. Implement classmethod behavior for `date.today` and `datetime.now` yielding `AttrCallResult::OsCall`.
 
 ### 4) VM call-path extension
-1. Extend type classmethod dispatch in `crates/monty/src/bytecode/vm/call.rs` so type methods can return `OsCall` for builtin type objects (similar to existing attr call flow).
-2. Ensure ref-count safety in all early-return/error paths using `defer_drop!` or `HeapGuard`.
+1. **Refactor `call_type_method` return type**: currently returns `Result<Value, RunError>`, but `date.today()` and `datetime.now()` need to yield `AttrCallResult::OsCall`. Change the return type to `Result<AttrCallResult, RunError>` and update existing callers (`dict.fromkeys()`, `bytes.fromhex()`) to wrap their results in `AttrCallResult::Value(...)`.
+2. Add dispatch arms for `Type::Date` and `Type::DateTime` classmethods.
+3. Ensure ref-count safety in all early-return/error paths using `defer_drop!` or `HeapGuard`.
 
 ### 5) OS function enum and dispatch
 1. Add `DateTimeNow` in `crates/monty/src/os.rs`.
@@ -139,18 +162,22 @@ Representation must make arithmetic/comparison cheap and deterministic.
 - invalid timezone offset ranges
 
 ## Native Python Binding Tasks
-### 1) Conversion layer
+### 1) Public object model
+Update `crates/monty/src/object.rs`:
+1. Add `MontyObject` variants with explicit payloads:
+- `MontyObject::Date { year: i32, month: u8, day: u8 }`
+- `MontyObject::DateTime { year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8, microsecond: u32, offset_seconds: Option<i32> }` (None = naive)
+- `MontyObject::TimeDelta { days: i32, seconds: i32, microseconds: i32 }`
+- `MontyObject::TimeZone { offset_seconds: i32, name: Option<String> }`
+2. Add serialization (JSON: use civil components for human readability) and `to_value`/`from_value` conversion paths.
+
+### 2) Conversion layer
 Update `crates/monty-python/src/convert.rs`:
 1. `py_to_monty`:
 - recognize Python `datetime.date`, `datetime.datetime`, `datetime.timedelta`, `datetime.timezone`
-- convert to dedicated `MontyObject` variants (new variants required in core object model)
+- convert to the `MontyObject` variants defined above (extract civil components from native Python objects)
 2. `monty_to_py`:
-- reconstruct native Python datetime objects, not strings/tuples
-
-### 2) Public object model
-Update `crates/monty/src/object.rs`:
-1. Add `MontyObject` variants for date/datetime/timedelta/timezone.
-2. Add serialization and `to_value`/`from_value` conversion paths.
+- reconstruct native Python datetime objects from `MontyObject` variant payloads (not strings/tuples)
 
 ### 3) Python callback typing and helpers
 1. Extend `OsFunction` literal in `crates/monty-python/python/pydantic_monty/os_access.py` with `'datetime.now'`.
@@ -164,16 +191,19 @@ Update `crates/monty/src/object.rs`:
 4. Add/update type-check test fixture coverage for new datetime module symbols.
 
 ## Test Plan
-### 1) Rust unit/integration tests
+
+**Dependency note**: The datatest harness mock dispatcher (task 2) must be implemented before `# call-external` test cases (task 3) can run, since those tests need `DateTimeNow` to be handled deterministically.
+
+### 1) Datatest harness (implement first)
+1. Update `crates/monty/tests/datatest_runner.rs` OS dispatcher:
+- handle `DateTimeNow` deterministically with a fixed timestamp fixture (e.g., `1700000000.0` = 2023-11-14 22:13:20 UTC)
+2. Update `scripts/iter_test_methods.py` with CPython-side equivalent behavior for `# call-external` tests.
+
+### 2) Rust unit/integration tests
 1. Extend `crates/monty/tests/os_tests.rs`:
 - verify `date.today()` and `datetime.now(...)` yield `OsCall` with `OsFunction::DateTimeNow`
-- verify argument payload (`mode`, `offset_seconds`)
+- verify argument payload (`offset_seconds`)
 2. Add arithmetic/unit tests for date/datetime/timedelta semantics and error cases.
-
-### 2) Datatest harness
-1. Update `crates/monty/tests/datatest_runner.rs` OS dispatcher:
-- handle `DateTimeNow` deterministically with fixed timestamp fixtures
-2. Update `scripts/iter_test_methods.py` with CPython-side equivalent behavior for `# call-external` tests.
 
 ### 3) Python test cases (core)
 Add consolidated file `crates/monty/test_cases/datetime__core.py` with `# call-external` covering:
@@ -182,6 +212,7 @@ Add consolidated file `crates/monty/test_cases/datetime__core.py` with `# call-e
 3. date/datetime +/- timedelta operations.
 4. datetime subtraction results.
 5. aware vs naive exception exactness.
+6. `timezone.utc` constant access.
 
 ### 4) Python package tests
 Add/extend `crates/monty-python/tests/test_os_calls.py`:
@@ -202,8 +233,9 @@ Run after implementation:
 1. No direct wall-clock reads inside sandbox runtime; all now values come from callback.
 2. No new host resource access paths besides explicit `RunProgress::OsCall`.
 3. Callback argument validation enforces strict types/ranges.
-4. No unbounded allocations from datetime operations.
-5. Ref-count correctness verified on all error paths.
+4. No unbounded allocations from datetime operations — `timedelta` bounds (`-999999999 <= days <= 999999999`) enforced on all constructors and arithmetic results.
+5. Timezone offset range enforced (`-86340..=86340` seconds).
+6. Ref-count correctness verified on all error paths.
 
 ## Rollout Strategy
 1. Land phase 1 as one feature-complete PR for fixed-offset + native Python bindings.
