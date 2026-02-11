@@ -11,8 +11,8 @@ use crate::{
     intern::{StaticStrings, StringId},
     resource::ResourceTracker,
     types::{
-        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, Tuple,
-        bytes::bytes_fromhex, dict::dict_fromkeys, str::StringRepr,
+        Bytes, Date, DateTime, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str,
+        TimeDelta, TimeZone, Tuple, bytes::bytes_fromhex, dict::dict_fromkeys, str::StringRepr,
     },
     value::Value,
 };
@@ -34,6 +34,10 @@ pub enum Type {
     Float,
     Range,
     Slice,
+    Date,
+    DateTime,
+    TimeDelta,
+    TimeZone,
     Str,
     Bytes,
     List,
@@ -76,6 +80,10 @@ impl fmt::Display for Type {
             Self::Float => f.write_str("float"),
             Self::Range => f.write_str("range"),
             Self::Slice => f.write_str("slice"),
+            Self::Date => f.write_str("date"),
+            Self::DateTime => f.write_str("datetime"),
+            Self::TimeDelta => f.write_str("timedelta"),
+            Self::TimeZone => f.write_str("timezone"),
             Self::Str => f.write_str("str"),
             Self::Bytes => f.write_str("bytes"),
             Self::List => f.write_str("list"),
@@ -214,6 +222,10 @@ impl Type {
             Self::Bytes => Bytes::init(vm, args),
             Self::Range => Range::init(vm, args),
             Self::Slice => Slice::init(vm, args),
+            Self::Date => Date::init(vm.heap, args, vm.interns),
+            Self::DateTime => DateTime::init(vm.heap, args, vm.interns),
+            Self::TimeDelta => TimeDelta::init(vm.heap, args, vm.interns),
+            Self::TimeZone => TimeZone::init(vm.heap, args, vm.interns),
             Self::Iterator => MontyIter::init(vm, args),
             Self::Path => Path::init(vm, args),
 
@@ -384,6 +396,7 @@ fn value_error_invalid_literal_for_int(value: &str) -> RunError {
 ///
 /// Handles classmethods like `dict.fromkeys()` and `bytes.fromhex()` that are
 /// called on the type itself rather than on an instance.
+#[expect(dead_code)]
 pub(crate) fn call_type_method(
     t: Type,
     method_id: StringId,

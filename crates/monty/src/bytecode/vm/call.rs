@@ -14,11 +14,14 @@ use crate::{
     exception_private::{ExcType, RunError},
     heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId},
     heap_data::CellValue,
-    intern::{FunctionId, StringId},
+    intern::{FunctionId, StaticStrings, StringId},
     os::OsFunction,
     resource::ResourceTracker,
     types::{
-        AttrCallResult, Dict, PyTrait, Type, bytes::call_bytes_method, str::call_str_method, r#type::call_type_method,
+        AttrCallResult, Date, DateTime, Dict, PyTrait, Type,
+        bytes::{bytes_fromhex, call_bytes_method},
+        dict::dict_fromkeys,
+        str::call_str_method,
     },
     value::{EitherStr, Value},
 };
@@ -294,7 +297,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             }
             Value::Builtin(Builtins::Type(t)) => {
                 // Handle classmethods on type objects like dict.fromkeys()
-                call_type_method(t, name_id, args, this).map(CallResult::Push)
+                call_type_method(t, name_id, args, this).map(Into::into)
             }
             _ => {
                 // Non-heap values without method support
@@ -796,4 +799,32 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
 
         Ok(CallResult::FramePushed)
     }
+}
+
+
+/// Dispatches a classmethod call on a type object.
+///
+/// Handles classmethods like `dict.fromkeys()` and `bytes.fromhex()` that are
+/// called on the type itself rather than on an instance.
+fn call_type_method(
+    t: Type,
+    method_id: StringId,
+    args: ArgValues,
+    vm: &mut VM<'_, '_, impl ResourceTracker>,
+) -> Result<AttrCallResult, RunError> {
+    match (t, method_id) {
+        (Type::Dict, m) if m == StaticStrings::Fromkeys => {
+            return dict_fromkeys(args, vm).map(AttrCallResult::Value);
+        }
+        (Type::Bytes, m) if m == StaticStrings::Fromhex => {
+            return bytes_fromhex(args, vm.heap, vm.interns).map(AttrCallResult::Value);
+        }
+        (Type::Date, m) if m == StaticStrings::Today => return Date::class_today(vm.heap, args),
+        (Type::DateTime, m) if m == StaticStrings::Now => return DateTime::class_now(vm.heap, args, vm.interns),
+        _ => {}
+    }
+    // Other types or unknown methods - report actual type name, not 'type'
+    let method_name = vm.interns.get_str(method_id);
+    args.drop_with_heap(vm.heap);
+    Err(ExcType::attribute_error(t, method_name))
 }

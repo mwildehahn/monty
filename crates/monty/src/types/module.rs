@@ -2,6 +2,7 @@
 
 use crate::{
     args::ArgValues,
+    builtins::Builtins,
     bytecode::VM,
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapGuard, HeapId},
@@ -121,7 +122,9 @@ impl Module {
     /// Calls an attribute as a function on this module.
     ///
     /// Modules don't have methods - they have callable attributes. This looks up
-    /// the attribute and calls it if it's a `ModuleFunction`.
+    /// the attribute and calls it when it is either:
+    /// - a module function (`Value::ModuleFunction`)
+    /// - a builtin type exposed via the module namespace (`Value::Builtin(Type)`)
     ///
     /// Returns `AttrCallResult` because module functions may need OS operations
     /// (e.g., `os.getenv()`) that require host involvement.
@@ -149,15 +152,16 @@ impl Module {
                 let (args, heap) = args_guard.into_parts();
                 mf.call(heap, args, interns)
             }
+            Some(Value::Builtin(Builtins::Type(t))) => {
+                let args = args_guard.into_inner();
+                Ok(AttrCallResult::Value(t.call(vm, args)?))
+            }
             Some(func) => {
                 // Found attribute but it's not callable
                 func.drop_with_heap(args_guard.heap());
                 Err(ExcType::type_error("module attribute is not callable"))
             }
-            None => Err(ExcType::attribute_error_module(
-                interns.get_str(self.name),
-                attr.as_str(vm.interns),
-            )),
+            None => Err(ExcType::attribute_error_module(interns.get_str(self.name), attr.as_str(interns))),
         }
     }
 }

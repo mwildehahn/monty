@@ -23,7 +23,7 @@ use crate::{
     modules::ModuleFunctions,
     resource::{ResourceError, ResourceTracker, check_div_size, check_lshift_size, check_pow_size, check_repeat_size},
     types::{
-        AttrCallResult, LongInt, Property, PyTrait, Str, Type,
+        AttrCallResult, LongInt, Property, PyTrait, Str, TimeZone, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
         path,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
@@ -542,7 +542,22 @@ impl PyTrait for Value {
                 }
             }
             // LongInt - LongInt
-            (Self::Ref(id1), Self::Ref(id2)) => heap.with_two(*id1, *id2, |heap, left, right| left.py_sub(right, heap)),
+            (Self::Ref(id1), Self::Ref(id2)) => {
+                let is_longint1 = matches!(heap.get(*id1), HeapData::LongInt(_));
+                let is_longint2 = matches!(heap.get(*id2), HeapData::LongInt(_));
+                if is_longint1 && is_longint2 {
+                    heap.with_two(*id1, *id2, |heap, left, right| {
+                        if let (HeapData::LongInt(a), HeapData::LongInt(b)) = (left, right) {
+                            let result = LongInt::new(a.inner() - b.inner());
+                            result.into_value(heap).map(Some)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                } else {
+                    heap.with_two(*id1, *id2, |heap, left, right| left.py_sub(right, heap))
+                }
+            }
             // Float - Float
             (Self::Float(a), Self::Float(b)) => Ok(Some(Self::Float(a - b))),
             // Int - Float and Float - Int
@@ -1639,6 +1654,11 @@ impl Value {
                     let name_str = t.to_string();
                     let str_id = heap.allocate(HeapData::Str(Str::from(name_str)))?;
                     return Ok(AttrCallResult::Value(Self::Ref(str_id)));
+                }
+                // `datetime.timezone.utc` class attribute.
+                if *t == Type::TimeZone && attr.as_str(interns) == "utc" {
+                    let tz_id = heap.allocate(HeapData::TimeZone(TimeZone::utc()))?;
+                    return Ok(AttrCallResult::Value(Self::Ref(tz_id)));
                 }
             }
             _ => {}
