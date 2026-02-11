@@ -3,7 +3,7 @@
 ## Goal
 Implement a secure, minimal `datetime` feature set in Monty that enables:
 1. Getting "now" through host-controlled OS callbacks.
-2. Calculating today's date in a requested fixed-offset timezone.
+2. Calculating local `date.today()` and fixed-offset `datetime.now(tz=...)` values from that callback source.
 3. Performing `datetime`/`date` and `timedelta` arithmetic.
 4. End-to-end native Python tests through `pydantic_monty`.
 
@@ -43,7 +43,9 @@ This phase intentionally avoids broad stdlib parity and focuses on a small, defe
 - `timedelta` bounds enforced: `-999999999 <= days <= 999999999` (matches CPython, prevents unbounded arithmetic chains)
 6. Basic comparisons:
 - same-type comparisons for `date`, `datetime`, `timedelta`
-- enforce aware/naive rules for `datetime` subtraction/comparison
+- enforce CPython aware/naive rules for `datetime`:
+  - subtraction and ordering comparisons (`<`, `<=`, `>`, `>=`) between naive and aware raise `TypeError`
+  - equality/inequality (`==`, `!=`) between naive and aware do not raise
 7. `timedelta.total_seconds()`.
 8. `__repr__` and `__str__` output must match CPython exactly:
 - `date.__repr__`: `datetime.date(2024, 1, 15)`
@@ -67,23 +69,26 @@ Add `OsFunction::DateTimeNow` serialized as `datetime.now`.
 
 ### Callback arguments
 - Function name: `datetime.now`
-- Positional args:
-  1. `offset_seconds: int | None` (requested fixed offset; `None` means "use host local time")
+- Positional args: none for phase 1.
 - Keyword args: none for phase 1.
 
-Note: `mode` was considered but dropped — all callers (`datetime.now()`, `date.today()`, future `time.time()`) need the same thing: a Unix timestamp. Monty decides what to construct from it. If a future use case needs different host behavior, a new `OsFunction` variant can be added.
+Note: `mode` was considered but dropped — all callers (`datetime.now()`, `date.today()`, future `time.time()`) use the same payload shape. Monty decides what to construct from it. If a future use case needs different host behavior, a new `OsFunction` variant can be added.
 
 ### Callback return values (phase 1)
-Return Unix timestamp as float seconds (`float`). The host always returns the same value regardless of caller.
+Return a 2-tuple:
+1. `timestamp_utc: float` (Unix timestamp seconds in UTC)
+2. `local_offset_seconds: int` (host local UTC offset, in seconds, for that instant)
+
+The return shape is identical for all callers. `time.time()` can reuse this callback and read only `timestamp_utc`.
 
 ### Monty-side conversion
-1. If `tz=None`: the host returns a timestamp representing local time as-if UTC (i.e., the host applies the local UTC offset before returning). Monty constructs a **naive** datetime from this timestamp by treating it as UTC civil time. This matches CPython's `datetime.now()` behavior where the result is a naive datetime with local wall-clock values.
-2. If `tz=timezone(offset)`: the host returns a UTC timestamp. Monty applies the fixed offset on its side to produce an **aware** datetime.
-3. `date.today()` calls the same callback with `offset_seconds=None`, then extracts only the date portion.
+1. If `tz=None`: Monty computes local civil time from `timestamp_utc + local_offset_seconds`, then constructs a **naive** datetime with those wall-clock components.
+2. If `tz=timezone(offset)`: Monty uses `timestamp_utc` and applies the requested fixed offset on its side to produce an **aware** datetime.
+3. `date.today()` calls the same callback and derives the date from the same local civil basis as `datetime.now(tz=None)`.
 
 ### Why this contract
 1. Single source of truth for "now".
-2. Reuses cleanly for future `time.time()` (same callback, Monty just returns the float directly).
+2. Reuses cleanly for future `time.time()` (same callback, Monty returns `timestamp_utc`).
 3. Keeps host API simple and deterministic for tests.
 
 ## Runtime Data Model
@@ -103,6 +108,7 @@ Implement new heap types in `crates/monty/src/types/`:
 4. `TimeZone`
 - Stored as fixed offset seconds (`i32`) and optional display name (`Option<StringId>`).
 - Offset range: `-86340 <= offset_seconds <= 86340` (matching CPython's `timedelta(hours=23, minutes=59)` limit). `ValueError` on violation.
+- Offset must be an exact whole number of minutes (`offset_seconds % 60 == 0`) to match CPython `datetime.timezone` validation.
 
 All four types are immutable and contain no heap references, so `is_gc_tracked()` returns `false`.
 
@@ -150,7 +156,7 @@ Tasks 1-2 (wiring + type system) → Task 5 (OS enum) → Task 3 (behavior) → 
 2. Ensure `RunProgress::OsCall` stringification yields `datetime.now` in bindings.
 
 ### 6) Arithmetic integration
-1. Update `crates/monty/src/value.rs` binary operation routing so `Value::Ref` subtraction/addition can delegate to new type ops, not only current LongInt-specialized paths.
+1. Update `crates/monty/src/value.rs` binary operation routing so `Value::Ref` subtraction can delegate to heap type ops (mirroring current `Ref + Ref` behavior in `py_add`), instead of only current LongInt-specialized handling.
 2. Preserve existing numeric behavior and avoid regressions.
 
 ### 7) Exception parity
@@ -196,13 +202,15 @@ Update `crates/monty-python/src/convert.rs`:
 
 ### 1) Datatest harness (implement first)
 1. Update `crates/monty/tests/datatest_runner.rs` OS dispatcher:
-- handle `DateTimeNow` deterministically with a fixed timestamp fixture (e.g., `1700000000.0` = 2023-11-14 22:13:20 UTC)
+- handle `DateTimeNow` deterministically with a fixed fixture payload:
+  - `timestamp_utc = 1700000000.0` (2023-11-14 22:13:20 UTC)
+  - `local_offset_seconds = 0` (or another explicit fixed value for offset-focused cases)
 2. Update `scripts/iter_test_methods.py` with CPython-side equivalent behavior for `# call-external` tests.
 
 ### 2) Rust unit/integration tests
 1. Extend `crates/monty/tests/os_tests.rs`:
 - verify `date.today()` and `datetime.now(...)` yield `OsCall` with `OsFunction::DateTimeNow`
-- verify argument payload (`offset_seconds`)
+- verify callback args/kwargs are empty and return payload shape is validated
 2. Add arithmetic/unit tests for date/datetime/timedelta semantics and error cases.
 
 ### 3) Python test cases (core)
@@ -213,11 +221,13 @@ Add consolidated file `crates/monty/test_cases/datetime__core.py` with `# call-e
 4. datetime subtraction results.
 5. aware vs naive exception exactness.
 6. `timezone.utc` constant access.
+7. naive/aware equality and inequality behavior exactness (`==`/`!=` do not raise).
+8. timezone offset minute-granularity validation.
 
 ### 4) Python package tests
 Add/extend `crates/monty-python/tests/test_os_calls.py`:
 1. Snapshot of `MontySnapshot.function_name == 'datetime.now'`.
-2. Resume with native Python `datetime`/timestamp return and assert Monty output uses native datetime classes.
+2. Resume with callback payload tuple `(timestamp_utc, local_offset_seconds)` and assert Monty output uses native datetime classes.
 3. End-to-end test of arithmetic in Monty with native datetime values crossing callback boundary.
 
 ## Validation Commands
@@ -232,9 +242,9 @@ Run after implementation:
 ## Security Review Checklist
 1. No direct wall-clock reads inside sandbox runtime; all now values come from callback.
 2. No new host resource access paths besides explicit `RunProgress::OsCall`.
-3. Callback argument validation enforces strict types/ranges.
+3. Callback payload validation enforces strict types/ranges.
 4. No unbounded allocations from datetime operations — `timedelta` bounds (`-999999999 <= days <= 999999999`) enforced on all constructors and arithmetic results.
-5. Timezone offset range enforced (`-86340..=86340` seconds).
+5. Timezone offset validation enforced (`-86340..=86340` seconds and whole-minute granularity).
 6. Ref-count correctness verified on all error paths.
 
 ## Rollout Strategy
@@ -243,7 +253,7 @@ Run after implementation:
 3. Follow with phase 2 PR for `time.time()`, parsing/formatting, and broader stdlib parity.
 
 ## Phase 2 Preview (Not in this PR)
-1. Implement `time.time()` using the same `datetime.now` callback contract (`mode='timestamp'`).
+1. Implement `time.time()` using the same `datetime.now` callback contract (read `timestamp_utc` from callback payload).
 2. Add ISO parse/format support (`speedate` integration candidate).
 3. Add richer constructors (`fromtimestamp`, UTC variants).
 4. Evaluate IANA timezone/DST support with clear host policy boundaries.
