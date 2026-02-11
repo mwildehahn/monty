@@ -322,6 +322,27 @@ pub enum StaticStrings {
     Default,
 
     // ==========================
+    // datetime module strings
+    #[strum(serialize = "datetime")]
+    Datetime,
+    #[strum(serialize = "date")]
+    Date,
+    #[strum(serialize = "timedelta")]
+    Timedelta,
+    #[strum(serialize = "timezone")]
+    Timezone,
+    #[strum(serialize = "today")]
+    Today,
+    #[strum(serialize = "now")]
+    Now,
+    #[strum(serialize = "utc")]
+    Utc,
+    #[strum(serialize = "total_seconds")]
+    TotalSeconds,
+    #[strum(serialize = "tzinfo")]
+    Tzinfo,
+
+    // ==========================
     // Exception attributes
     Args,
 

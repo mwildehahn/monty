@@ -2,6 +2,7 @@
 
 use crate::{
     args::ArgValues,
+    builtins::Builtins,
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapGuard, HeapId},
     intern::{Interns, StringId},
@@ -122,7 +123,9 @@ impl Module {
     /// Calls an attribute as a function on this module.
     ///
     /// Modules don't have methods - they have callable attributes. This looks up
-    /// the attribute and calls it if it's a `ModuleFunction`.
+    /// the attribute and calls it when it is either:
+    /// - a module function (`Value::ModuleFunction`)
+    /// - a builtin type exposed via the module namespace (`Value::Builtin(Type)`)
     ///
     /// Returns `AttrCallResult` because module functions may need OS operations
     /// (e.g., `os.getenv()`) that require host involvement.
@@ -149,6 +152,10 @@ impl Module {
             Some(Value::ModuleFunction(mf)) => {
                 let (args, heap) = args_guard.into_parts();
                 mf.call(heap, args)
+            }
+            Some(Value::Builtin(Builtins::Type(t))) => {
+                let (args, heap) = args_guard.into_parts();
+                Ok(AttrCallResult::Value(t.call(heap, args, interns)?))
             }
             Some(func) => {
                 // Found attribute but it's not callable

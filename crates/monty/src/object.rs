@@ -15,7 +15,7 @@ use crate::{
     intern::Interns,
     resource::{DepthGuard, ResourceError, ResourceTracker},
     types::{
-        LongInt, NamedTuple, Path, PyTrait, Type, allocate_tuple,
+        Date, DateTime, LongInt, NamedTuple, Path, PyTrait, TimeDelta, TimeZone, Type, allocate_tuple,
         bytes::{Bytes, bytes_repr},
         dict::Dict,
         list::List,
@@ -108,6 +108,50 @@ pub enum MontyObject {
     Set(Vec<Self>),
     /// Python frozenset (immutable, unordered collection of unique elements).
     FrozenSet(Vec<Self>),
+    /// Python `datetime.date`.
+    Date {
+        /// Gregorian year in range 1..=9999.
+        year: i32,
+        /// Month component in range 1..=12.
+        month: u8,
+        /// Day component valid for the given month/year.
+        day: u8,
+    },
+    /// Python `datetime.datetime`.
+    DateTime {
+        /// Gregorian year in range 1..=9999.
+        year: i32,
+        /// Month component in range 1..=12.
+        month: u8,
+        /// Day component valid for the given month/year.
+        day: u8,
+        /// Hour in range 0..=23.
+        hour: u8,
+        /// Minute in range 0..=59.
+        minute: u8,
+        /// Second in range 0..=59.
+        second: u8,
+        /// Microsecond in range 0..=999_999.
+        microsecond: u32,
+        /// Fixed offset seconds for aware datetimes, or `None` for naive values.
+        offset_seconds: Option<i32>,
+    },
+    /// Python `datetime.timedelta`.
+    TimeDelta {
+        /// Day component.
+        days: i32,
+        /// Seconds component in normalized range 0..86400.
+        seconds: i32,
+        /// Microseconds component in normalized range 0..1_000_000.
+        microseconds: i32,
+    },
+    /// Python `datetime.timezone` fixed-offset timezone.
+    TimeZone {
+        /// Fixed UTC offset in seconds.
+        offset_seconds: i32,
+        /// Optional display name.
+        name: Option<String>,
+    },
     /// Python exception with type and optional message argument.
     Exception {
         /// The exception type (e.g., `ValueError`, `TypeError`).
@@ -264,6 +308,52 @@ impl MontyObject {
                 // Convert to frozenset by extracting storage
                 let frozenset = FrozenSet::from_set(set);
                 Ok(Value::Ref(heap.allocate(HeapData::FrozenSet(frozenset))?))
+            }
+            Self::Date { year, month, day } => {
+                let date = Date::from_ymd(year, i32::from(month), i32::from(day))
+                    .map_err(|_| InvalidInputError::invalid_type("date"))?;
+                Ok(Value::Ref(heap.allocate(HeapData::Date(date))?))
+            }
+            Self::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                microsecond,
+                offset_seconds,
+            } => {
+                let tzinfo = offset_seconds
+                    .map(|offset| TimeZone::new(offset, None))
+                    .transpose()
+                    .map_err(|_| InvalidInputError::invalid_type("datetime"))?;
+                let datetime = DateTime::from_components(
+                    year,
+                    i32::from(month),
+                    i32::from(day),
+                    i32::from(hour),
+                    i32::from(minute),
+                    i32::from(second),
+                    i32::try_from(microsecond).map_err(|_| InvalidInputError::invalid_type("datetime"))?,
+                    tzinfo,
+                )
+                .map_err(|_| InvalidInputError::invalid_type("datetime"))?;
+                Ok(Value::Ref(heap.allocate(HeapData::DateTime(datetime))?))
+            }
+            Self::TimeDelta {
+                days,
+                seconds,
+                microseconds,
+            } => {
+                let delta = TimeDelta::new(days, seconds, microseconds)
+                    .map_err(|_| InvalidInputError::invalid_type("timedelta"))?;
+                Ok(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?))
+            }
+            Self::TimeZone { offset_seconds, name } => {
+                let tz =
+                    TimeZone::new(offset_seconds, name).map_err(|_| InvalidInputError::invalid_type("timezone"))?;
+                Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))
             }
             Self::Exception { exc_type, arg } => {
                 let exc = SimpleException::new(exc_type, arg);
@@ -423,6 +513,39 @@ impl MontyObject {
                         let _ = range.py_repr_fmt(&mut s, heap, visited, guard, interns);
                         Self::Repr(s)
                     }
+                    HeapData::Date(date) => {
+                        let (year, month, day) = date.to_ymd();
+                        Self::Date {
+                            year,
+                            month: u8::try_from(month).expect("month is always 1..=12"),
+                            day: u8::try_from(day).expect("day is always 1..=31"),
+                        }
+                    }
+                    HeapData::DateTime(datetime) => {
+                        if let Some((year, month, day, hour, minute, second, microsecond)) = datetime.to_components() {
+                            Self::DateTime {
+                                year,
+                                month,
+                                day,
+                                hour,
+                                minute,
+                                second,
+                                microsecond,
+                                offset_seconds: datetime.offset_seconds,
+                            }
+                        } else {
+                            Self::Repr(object.py_repr(heap, guard, interns).into_owned())
+                        }
+                    }
+                    HeapData::TimeDelta(delta) => Self::TimeDelta {
+                        days: delta.days,
+                        seconds: delta.seconds,
+                        microseconds: delta.microseconds,
+                    },
+                    HeapData::TimeZone(tz) => Self::TimeZone {
+                        offset_seconds: tz.offset_seconds,
+                        name: tz.name.clone(),
+                    },
                     HeapData::Exception(exc) => Self::Exception {
                         exc_type: exc.exc_type(),
                         arg: exc.arg().map(ToString::to_string),
@@ -610,6 +733,72 @@ impl MontyObject {
                 }
                 f.write_char(')')
             }
+            Self::Date { year, month, day } => write!(f, "datetime.date({year}, {month}, {day})"),
+            Self::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                microsecond,
+                offset_seconds,
+            } => {
+                write!(f, "datetime.datetime({year}, {month}, {day}, {hour}, {minute}")?;
+                if *second != 0 || *microsecond != 0 {
+                    write!(f, ", {second}")?;
+                }
+                if *microsecond != 0 {
+                    write!(f, ", {microsecond}")?;
+                }
+                if let Some(offset) = offset_seconds {
+                    if *offset == 0 {
+                        f.write_str(", tzinfo=datetime.timezone.utc")?;
+                    } else {
+                        write!(f, ", tzinfo=datetime.timezone(datetime.timedelta(seconds={offset}))")?;
+                    }
+                }
+                f.write_char(')')
+            }
+            Self::TimeDelta {
+                days,
+                seconds,
+                microseconds,
+            } => {
+                if *days == 0 && *seconds == 0 && *microseconds == 0 {
+                    return f.write_str("datetime.timedelta(0)");
+                }
+                f.write_str("datetime.timedelta(")?;
+                let mut first = true;
+                if *days != 0 {
+                    write!(f, "days={days}")?;
+                    first = false;
+                }
+                if *seconds != 0 {
+                    if !first {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "seconds={seconds}")?;
+                    first = false;
+                }
+                if *microseconds != 0 {
+                    if !first {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "microseconds={microseconds}")?;
+                }
+                f.write_char(')')
+            }
+            Self::TimeZone { offset_seconds, name } => {
+                if *offset_seconds == 0 && name.is_none() {
+                    return f.write_str("datetime.timezone.utc");
+                }
+                write!(f, "datetime.timezone(datetime.timedelta(seconds={offset_seconds})")?;
+                if let Some(name) = name {
+                    write!(f, ", {}", StringRepr(name))?;
+                }
+                f.write_char(')')
+            }
             Self::Exception { exc_type, arg } => {
                 let type_str: &'static str = exc_type.into();
                 write!(f, "{type_str}(")?;
@@ -681,6 +870,14 @@ impl MontyObject {
             Self::Dict(d) => !d.is_empty(),
             Self::Set(s) => !s.is_empty(),
             Self::FrozenSet(fs) => !fs.is_empty(),
+            Self::Date { .. } => true,
+            Self::DateTime { .. } => true,
+            Self::TimeDelta {
+                days,
+                seconds,
+                microseconds,
+            } => *days != 0 || *seconds != 0 || *microseconds != 0,
+            Self::TimeZone { .. } => true,
             Self::Exception { .. } => true,
             Self::Path(_) => true,          // Path instances are always truthy
             Self::Dataclass { .. } => true, // Dataclass instances are always truthy
@@ -707,6 +904,10 @@ impl MontyObject {
             Self::Dict(_) => "dict",
             Self::Set(_) => "set",
             Self::FrozenSet(_) => "frozenset",
+            Self::Date { .. } => "date",
+            Self::DateTime { .. } => "datetime",
+            Self::TimeDelta { .. } => "timedelta",
+            Self::TimeZone { .. } => "timezone",
             Self::Exception { .. } => "Exception",
             Self::Path(_) => "PosixPath",
             Self::Dataclass { .. } => "dataclass",
@@ -745,6 +946,43 @@ impl Hash for MontyObject {
             Self::Float(f) => f.to_bits().hash(state),
             Self::String(string) => string.hash(state),
             Self::Bytes(bytes) => bytes.hash(state),
+            Self::Date { year, month, day } => {
+                year.hash(state);
+                month.hash(state);
+                day.hash(state);
+            }
+            Self::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                microsecond,
+                offset_seconds,
+            } => {
+                year.hash(state);
+                month.hash(state);
+                day.hash(state);
+                hour.hash(state);
+                minute.hash(state);
+                second.hash(state);
+                microsecond.hash(state);
+                offset_seconds.hash(state);
+            }
+            Self::TimeDelta {
+                days,
+                seconds,
+                microseconds,
+            } => {
+                days.hash(state);
+                seconds.hash(state);
+                microseconds.hash(state);
+            }
+            Self::TimeZone { offset_seconds, name } => {
+                offset_seconds.hash(state);
+                name.hash(state);
+            }
             Self::Path(path) => path.hash(state),
             Self::Type(t) => t.to_string().hash(state),
             Self::Cycle(_, _) => panic!("cycle values are not hashable"),
@@ -769,6 +1007,71 @@ impl PartialEq for MontyObject {
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (Self::List(a), Self::List(b)) => a == b,
             (Self::Tuple(a), Self::Tuple(b)) => a == b,
+            (
+                Self::Date {
+                    year: ay,
+                    month: am,
+                    day: ad,
+                },
+                Self::Date {
+                    year: by,
+                    month: bm,
+                    day: bd,
+                },
+            ) => ay == by && am == bm && ad == bd,
+            (
+                Self::DateTime {
+                    year: ay,
+                    month: am,
+                    day: ad,
+                    hour: ah,
+                    minute: amin,
+                    second: asec,
+                    microsecond: aus,
+                    offset_seconds: aoff,
+                },
+                Self::DateTime {
+                    year: by,
+                    month: bm,
+                    day: bd,
+                    hour: bh,
+                    minute: bmin,
+                    second: bsec,
+                    microsecond: bus,
+                    offset_seconds: boff,
+                },
+            ) => {
+                ay == by
+                    && am == bm
+                    && ad == bd
+                    && ah == bh
+                    && amin == bmin
+                    && asec == bsec
+                    && aus == bus
+                    && aoff == boff
+            }
+            (
+                Self::TimeDelta {
+                    days: ad,
+                    seconds: asecs,
+                    microseconds: aus,
+                },
+                Self::TimeDelta {
+                    days: bd,
+                    seconds: bsecs,
+                    microseconds: bus,
+                },
+            ) => ad == bd && asecs == bsecs && aus == bus,
+            (
+                Self::TimeZone {
+                    offset_seconds: aoff,
+                    name: aname,
+                },
+                Self::TimeZone {
+                    offset_seconds: boff,
+                    name: bname,
+                },
+            ) => aoff == boff && aname == bname,
             (
                 Self::NamedTuple {
                     type_name: a_type,

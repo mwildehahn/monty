@@ -16,7 +16,7 @@ use crate::{
     os::OsFunction,
     resource::ResourceTracker,
     types::{
-        AttrCallResult, Dict, PyTrait, Type,
+        AttrCallResult, Date, DateTime, Dict, PyTrait, Type,
         bytes::{bytes_fromhex, call_bytes_method},
         dict::dict_fromkeys,
         str::call_str_method,
@@ -286,7 +286,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             }
             Value::Builtin(Builtins::Type(t)) => {
                 // Handle classmethods on type objects like dict.fromkeys()
-                call_type_method(t, name_id, args, this.heap, this.interns).map(CallResult::Push)
+                call_type_method(t, name_id, args, this.heap, this.interns).map(Into::into)
             }
             _ => {
                 // Non-heap values without method support
@@ -796,10 +796,16 @@ fn call_type_method(
     args: ArgValues,
     heap: &mut Heap<impl ResourceTracker>,
     interns: &Interns,
-) -> Result<Value, RunError> {
+) -> Result<AttrCallResult, RunError> {
     match (t, method_id) {
-        (Type::Dict, m) if m == StaticStrings::Fromkeys => return dict_fromkeys(args, heap, interns),
-        (Type::Bytes, m) if m == StaticStrings::Fromhex => return bytes_fromhex(args, heap, interns),
+        (Type::Dict, m) if m == StaticStrings::Fromkeys => {
+            return dict_fromkeys(args, heap, interns).map(AttrCallResult::Value);
+        }
+        (Type::Bytes, m) if m == StaticStrings::Fromhex => {
+            return bytes_fromhex(args, heap, interns).map(AttrCallResult::Value);
+        }
+        (Type::Date, m) if m == StaticStrings::Today => return Date::class_today(heap, args),
+        (Type::DateTime, m) if m == StaticStrings::Now => return DateTime::class_now(heap, args, interns),
         _ => {}
     }
     // Other types or unknown methods - report actual type name, not 'type'

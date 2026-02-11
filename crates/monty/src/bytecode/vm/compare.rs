@@ -4,6 +4,7 @@ use super::VM;
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
+    heap::HeapData,
     resource::{DepthGuard, ResourceTracker},
     types::{LongInt, PyTrait},
     value::Value,
@@ -53,7 +54,20 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         defer_drop!(lhs, this);
 
         let mut guard = DepthGuard::default();
-        let result = lhs.py_cmp(rhs, this.heap, &mut guard, this.interns)?.is_some_and(check);
+        let cmp = lhs.py_cmp(rhs, this.heap, &mut guard, this.interns)?;
+        let result = if let Some(ordering) = cmp {
+            check(ordering)
+        } else {
+            if let (Some(lhs_aware), Some(rhs_aware)) =
+                (datetime_awareness(lhs, this.heap), datetime_awareness(rhs, this.heap))
+                && lhs_aware != rhs_aware
+            {
+                return Err(ExcType::datetime_compare_naive_aware_error());
+            }
+            let lhs_type = lhs.py_type(this.heap);
+            let rhs_type = rhs.py_type(this.heap);
+            return Err(ExcType::ordering_type_error(lhs_type, rhs_type));
+        };
         this.push(Value::Bool(result));
         Ok(())
     }
@@ -148,5 +162,18 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                 Err(e) => Err(e),
             }
         }
+    }
+}
+
+/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
+///
+/// Returns `None` when the value is not a datetime reference.
+fn datetime_awareness(value: &Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> Option<bool> {
+    let Value::Ref(id) = value else {
+        return None;
+    };
+    match heap.get(*id) {
+        HeapData::DateTime(dt) => Some(dt.is_aware()),
+        _ => None,
     }
 }

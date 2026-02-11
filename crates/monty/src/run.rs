@@ -1,12 +1,14 @@
 //! Public interface for running Monty code.
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use num_traits::ToPrimitive;
+
 use crate::{
     ExcType, MontyException,
     asyncio::CallId,
     bytecode::{Code, Compiler, FrameExit, VM, VMSnapshot},
-    exception_private::RunResult,
-    heap::{DropWithHeap, Heap},
+    exception_private::{RunError, RunResult},
+    heap::{DropWithHeap, Heap, HeapData},
     intern::{ExtFunctionId, Interns},
     io::PrintWriter,
     namespace::Namespaces,
@@ -15,6 +17,7 @@ use crate::{
     parse::parse,
     prepare::prepare,
     resource::{NoLimitTracker, ResourceTracker},
+    types::{Date, DateTime, TimeZone},
     value::Value,
 };
 
@@ -306,6 +309,19 @@ impl<T: ResourceTracker + serde::de::DeserializeOwned> RunProgress<T> {
     }
 }
 
+/// Post-processing metadata for OS calls that require VM-side conversion.
+///
+/// `datetime.now` callbacks return a primitive payload tuple. The host should not
+/// need to know whether the caller was `date.today()` or `datetime.now(...)`, so we
+/// store that context in the snapshot and apply it when resuming.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+enum PendingOsTransform {
+    /// Build a `datetime.date` from local wall time.
+    DateToday,
+    /// Build a `datetime.datetime` using optional fixed offset timezone.
+    DateTimeNow { tz_offset_seconds: Option<i32> },
+}
+
 /// Execution state that can be resumed after an external function call.
 ///
 /// This struct owns all runtime state and provides methods to continue execution:
@@ -333,6 +349,8 @@ pub struct Snapshot<T: ResourceTracker> {
     /// The call_id from the most recent FunctionCall that created this Snapshot.
     /// Used by `run_pending()` to push the correct `ExternalFuture`.
     pending_call_id: u32,
+    /// Optional OS result transformation context for this pending call.
+    pending_os_transform: Option<PendingOsTransform>,
 }
 
 #[derive(Debug)]
@@ -392,7 +410,33 @@ impl<T: ResourceTracker> Snapshot<T> {
         result: impl Into<ExternalResult>,
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
+        enum ResumeAction {
+            ReturnObj(MontyObject),
+            ReturnValue(Value),
+            Error(RunError),
+            Future,
+        }
+
         let ext_result = result.into();
+
+        // Pre-process OS callback results before restoring the VM to avoid borrowing
+        // conflicts with the VM's mutable borrow of `self.heap`.
+        let resume_action = match ext_result {
+            ExternalResult::Return(obj) => {
+                if let Some(transform) = self.pending_os_transform {
+                    let value = transform_os_return_value(obj, transform, &mut self.heap)
+                        .map_err(|msg| MontyException::runtime_error(format!("invalid return type: {msg}")))?;
+                    ResumeAction::ReturnValue(value)
+                } else {
+                    ResumeAction::ReturnObj(obj)
+                }
+            }
+            ExternalResult::Error(exc) => {
+                let err = RunError::from(exc);
+                ResumeAction::Error(err)
+            }
+            ExternalResult::Future => ResumeAction::Future,
+        };
 
         // Restore the VM from the snapshot
         let mut vm = VM::restore(
@@ -405,10 +449,11 @@ impl<T: ResourceTracker> Snapshot<T> {
         );
 
         // Convert return value or exception before creating VM (to avoid borrow conflicts)
-        let vm_result = match ext_result {
-            ExternalResult::Return(obj) => vm.resume(obj),
-            ExternalResult::Error(exc) => vm.resume_with_exception(exc.into()),
-            ExternalResult::Future => {
+        let vm_result = match resume_action {
+            ResumeAction::ReturnObj(obj) => vm.resume(obj),
+            ResumeAction::ReturnValue(value) => vm.resume_value(value),
+            ResumeAction::Error(exc) => vm.resume_with_exception(exc),
+            ResumeAction::Future => {
                 // Get the call_id and ext_function_id that were stored when this Snapshot was created
                 let call_id = CallId::new(self.pending_call_id);
 
@@ -633,13 +678,14 @@ fn handle_vm_result<T: ResourceTracker>(
     mut namespaces: Namespaces,
 ) -> Result<RunProgress<T>, MontyException> {
     macro_rules! new_snapshot {
-        ($call_id: expr) => {
+        ($call_id: expr, $pending_os_transform: expr) => {
             Snapshot {
                 executor,
                 vm_state: vm_state.expect("snapshot should exist for ExternalCall"),
                 heap,
                 namespaces,
                 pending_call_id: $call_id.raw(),
+                pending_os_transform: $pending_os_transform,
             }
         };
     }
@@ -666,7 +712,7 @@ fn handle_vm_result<T: ResourceTracker>(
                 kwargs: kwargs_py,
                 call_id: call_id.raw(),
                 method_call: false,
-                state: new_snapshot!(call_id),
+                state: new_snapshot!(call_id, None),
             })
         }
         Ok(FrameExit::OsCall {
@@ -674,14 +720,26 @@ fn handle_vm_result<T: ResourceTracker>(
             args,
             call_id,
         }) => {
-            let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
+            let (internal_args, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
+
+            let (args_py, kwargs_py, pending_os_transform) = if function == OsFunction::DateTimeNow {
+                if !kwargs_py.is_empty() {
+                    return Err(MontyException::runtime_error(
+                        "internal error: datetime.now OS call should not include kwargs",
+                    ));
+                }
+                let transform = decode_datetime_now_transform(&internal_args)?;
+                (Vec::new(), Vec::new(), Some(transform))
+            } else {
+                (internal_args, kwargs_py, None)
+            };
 
             Ok(RunProgress::OsCall {
                 function,
                 args: args_py,
                 kwargs: kwargs_py,
                 call_id: call_id.raw(),
-                state: new_snapshot!(call_id),
+                state: new_snapshot!(call_id, pending_os_transform),
             })
         }
         Ok(FrameExit::MethodCall {
@@ -717,6 +775,121 @@ fn handle_vm_result<T: ResourceTracker>(
 
             Err(err.into_python_exception(&executor.interns, &executor.code))
         }
+    }
+}
+
+/// Decodes internal `datetime.now` mode arguments into snapshot resume transform metadata.
+fn decode_datetime_now_transform(args: &[MontyObject]) -> Result<PendingOsTransform, MontyException> {
+    let mode = args
+        .first()
+        .and_then(monty_object_to_i64)
+        .ok_or_else(|| MontyException::runtime_error("datetime.now internal mode argument is missing or invalid"))?;
+
+    match mode {
+        0 => {
+            if args.len() != 1 {
+                return Err(MontyException::runtime_error(
+                    "date.today internal OS call should include only one mode argument",
+                ));
+            }
+            Ok(PendingOsTransform::DateToday)
+        }
+        1 => {
+            if args.len() != 1 {
+                return Err(MontyException::runtime_error(
+                    "datetime.now(tz=None) internal OS call should include only one mode argument",
+                ));
+            }
+            Ok(PendingOsTransform::DateTimeNow {
+                tz_offset_seconds: None,
+            })
+        }
+        2 => {
+            if args.len() != 2 {
+                return Err(MontyException::runtime_error(
+                    "datetime.now(tz=...) internal OS call should include mode and offset",
+                ));
+            }
+            let offset_seconds = args
+                .get(1)
+                .and_then(monty_object_to_i32)
+                .ok_or_else(|| MontyException::runtime_error("datetime.now timezone offset must fit in 32-bit int"))?;
+            Ok(PendingOsTransform::DateTimeNow {
+                tz_offset_seconds: Some(offset_seconds),
+            })
+        }
+        _ => Err(MontyException::runtime_error(format!(
+            "unknown datetime.now internal mode: {mode}"
+        ))),
+    }
+}
+
+/// Transforms a host OS callback payload into the runtime `Value` expected by the VM.
+fn transform_os_return_value(
+    payload: MontyObject,
+    transform: PendingOsTransform,
+    heap: &mut Heap<impl ResourceTracker>,
+) -> Result<Value, String> {
+    let (timestamp_utc, local_offset_seconds) = parse_datetime_now_payload(payload)?;
+
+    match transform {
+        PendingOsTransform::DateToday => {
+            let local_dt = DateTime::from_now_payload(timestamp_utc, local_offset_seconds, None)
+                .map_err(|err| format!("{err:?}"))?;
+            let date = Date::from_local_unix_micros(local_dt.micros).map_err(|err| format!("{err:?}"))?;
+            let id = heap.allocate(HeapData::Date(date)).map_err(|e| e.to_string())?;
+            Ok(Value::Ref(id))
+        }
+        PendingOsTransform::DateTimeNow { tz_offset_seconds } => {
+            let tzinfo = tz_offset_seconds
+                .map(|offset| TimeZone::new(offset, None))
+                .transpose()
+                .map_err(|err| format!("{err:?}"))?;
+            let dt = DateTime::from_now_payload(timestamp_utc, local_offset_seconds, tzinfo)
+                .map_err(|err| format!("{err:?}"))?;
+            let id = heap.allocate(HeapData::DateTime(dt)).map_err(|e| e.to_string())?;
+            Ok(Value::Ref(id))
+        }
+    }
+}
+
+/// Parses the datetime OS callback payload `(timestamp_utc, local_offset_seconds)`.
+fn parse_datetime_now_payload(payload: MontyObject) -> Result<(f64, i32), String> {
+    let MontyObject::Tuple(items) = payload else {
+        return Err("datetime.now callback must return a 2-tuple".to_owned());
+    };
+    if items.len() != 2 {
+        return Err("datetime.now callback must return exactly two values".to_owned());
+    }
+
+    let timestamp_utc = match &items[0] {
+        MontyObject::Float(v) => *v,
+        _ => return Err("datetime.now timestamp must be a float".to_owned()),
+    };
+    if !timestamp_utc.is_finite() {
+        return Err("datetime.now timestamp must be finite".to_owned());
+    }
+
+    let local_offset_seconds = monty_object_to_i32(&items[1])
+        .ok_or_else(|| "datetime.now local offset must be an integer fitting i32".to_owned())?;
+    Ok((timestamp_utc, local_offset_seconds))
+}
+
+/// Converts a `MontyObject` integer-like value to i64.
+fn monty_object_to_i64(obj: &MontyObject) -> Option<i64> {
+    match obj {
+        MontyObject::Int(v) => Some(*v),
+        MontyObject::BigInt(v) => v.to_i64(),
+        _ => None,
+    }
+}
+
+/// Converts a `MontyObject` integer-like value to i32.
+fn monty_object_to_i32(obj: &MontyObject) -> Option<i32> {
+    match obj {
+        MontyObject::Int(v) => i32::try_from(*v).ok(),
+        MontyObject::BigInt(v) => v.to_i32(),
+        _ => None,
     }
 }
 

@@ -32,7 +32,7 @@ use crate::{
     os::OsFunction,
     parse::CodeRange,
     resource::ResourceTracker,
-    types::{LongInt, MontyIter, PyTrait, iter::advance_on_heap},
+    types::{LongInt, MontyIter, PyTrait, TimeDelta, iter::advance_on_heap},
     value::{BitwiseOp, EitherStr, Value},
 };
 
@@ -895,6 +895,16 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                                     Ok(v) => self.push(v),
                                     Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
                                 }
+                            } else if let HeapData::TimeDelta(delta) = self.heap.get(id) {
+                                let delta = *delta;
+                                value.drop_with_heap(self.heap);
+                                match TimeDelta::from_total_microseconds(-delta.total_microseconds()) {
+                                    Ok(negated) => match self.heap.allocate(HeapData::TimeDelta(negated)) {
+                                        Ok(id) => self.push(Value::Ref(id)),
+                                        Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
+                                    },
+                                    Err(e) => catch_sync!(self, cached_frame, e),
+                                }
                             } else {
                                 let value_type = value.py_type(self.heap);
                                 value.drop_with_heap(self.heap);
@@ -1450,6 +1460,14 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
         let value = obj
             .to_value(self.heap, self.interns)
             .map_err(|e| SimpleException::new(ExcType::RuntimeError, Some(format!("invalid return type: {e}"))))?;
+        self.resume_value(value)
+    }
+
+    /// Resumes execution with a pre-built runtime value.
+    ///
+    /// This is used by snapshot resume paths that need to post-process host return
+    /// values before pushing them back into the VM stack.
+    pub fn resume_value(&mut self, value: Value) -> Result<FrameExit, RunError> {
         self.push(value);
         self.run()
     }

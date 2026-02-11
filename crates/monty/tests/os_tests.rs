@@ -38,6 +38,9 @@ fn run_to_oscall(code: &str) -> (OsFunction, Vec<MontyObject>) {
                 | OsFunction::Rename => MontyObject::None,
                 OsFunction::Getenv => MontyObject::String("mock_env_value".to_owned()),
                 OsFunction::GetEnviron => MontyObject::Dict(vec![].into()),
+                OsFunction::DateTimeNow => {
+                    MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)])
+                }
             };
             let _ = state.run(mock_result, &mut PrintWriter::Stdout);
             (function, args)

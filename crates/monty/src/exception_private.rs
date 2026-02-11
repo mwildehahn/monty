@@ -910,6 +910,42 @@ impl ExcType {
         SimpleException::new_msg(Self::TypeError, message).into()
     }
 
+    /// Creates a TypeError for unsupported ordering comparisons.
+    ///
+    /// Matches CPython's format:
+    /// `'<'
+    /// not supported between instances of '{left}' and '{right}'`
+    #[must_use]
+    pub(crate) fn ordering_type_error(lhs_type: Type, rhs_type: Type) -> RunError {
+        SimpleException::new_msg(
+            Self::TypeError,
+            format!("'<' not supported between instances of '{lhs_type}' and '{rhs_type}'"),
+        )
+        .into()
+    }
+
+    /// Creates a TypeError for aware/naive datetime subtraction mismatch.
+    ///
+    /// Matches CPython's message for `datetime - datetime` when one operand is naive
+    /// and the other is aware.
+    #[must_use]
+    pub(crate) fn datetime_subtract_naive_aware_error() -> RunError {
+        SimpleException::new_msg(
+            Self::TypeError,
+            "can't subtract offset-naive and offset-aware datetimes",
+        )
+        .into()
+    }
+
+    /// Creates a TypeError for aware/naive datetime ordering comparison mismatch.
+    ///
+    /// Matches CPython's message for `<`, `<=`, `>`, `>=` when one datetime is naive
+    /// and the other is aware.
+    #[must_use]
+    pub(crate) fn datetime_compare_naive_aware_error() -> RunError {
+        SimpleException::new_msg(Self::TypeError, "can't compare offset-naive and offset-aware datetimes").into()
+    }
+
     /// Creates a TypeError for unsupported unary operations.
     ///
     /// Uses CPython's format: `bad operand type for unary {op}: '{type}'`

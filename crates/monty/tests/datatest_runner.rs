@@ -796,7 +796,7 @@ fn dispatch_os_call(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
 ) -> ExternalResult {
-    // Handle GetEnviron first as it takes no path argument
+    // Handle operations that don't take a path argument first.
     if function == OsFunction::GetEnviron {
         // Return the virtual environment as a dict
         let env_dict = vec![
@@ -815,6 +815,10 @@ fn dispatch_os_call(
         ];
         return MontyObject::Dict(env_dict.into()).into();
     }
+    if function == OsFunction::DateTimeNow {
+        // Deterministic `(timestamp_utc, local_offset_seconds)` payload.
+        return MontyObject::Tuple(vec![MontyObject::Float(VFS_MTIME), MontyObject::Int(0)]).into();
+    }
 
     // Extract path from MontyObject::Path (or String for backwards compatibility)
     let path = match &args[0] {
@@ -825,6 +829,7 @@ fn dispatch_os_call(
 
     match function {
         OsFunction::GetEnviron => unreachable!("handled above"),
+        OsFunction::DateTimeNow => unreachable!("handled above"),
         OsFunction::Exists => {
             let exists = get_virtual_file(&path).is_some() || is_virtual_dir(&path);
             MontyObject::Bool(exists).into()

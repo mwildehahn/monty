@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::hash_map::DefaultHasher,
     fmt::Write,
     hash::{Hash, Hasher},
@@ -20,8 +21,8 @@ use crate::{
     io::PrintWriter,
     resource::{DepthGuard, ResourceError, ResourceTracker, check_mult_size, check_repeat_size},
     types::{
-        AttrCallResult, Bytes, Dataclass, Dict, FrozenSet, List, LongInt, Module, MontyIter, NamedTuple, Path, PyTrait,
-        Range, Set, Slice, Str, Tuple, Type, allocate_tuple,
+        AttrCallResult, Bytes, Dataclass, Date, DateTime, Dict, FrozenSet, List, LongInt, Module, MontyIter,
+        NamedTuple, Path, PyTrait, Range, Set, Slice, Str, TimeDelta, TimeZone, Tuple, Type, allocate_tuple,
     },
     value::{EitherStr, Value},
 };
@@ -84,6 +85,14 @@ pub(crate) enum HeapData {
     /// Stored on the heap to keep `Value` enum small (16 bytes). Range objects
     /// are immutable and hashable.
     Range(Range),
+    /// A `datetime.date` value stored as a proleptic Gregorian ordinal day.
+    Date(Date),
+    /// A `datetime.datetime` value that is either naive or fixed-offset aware.
+    DateTime(DateTime),
+    /// A `datetime.timedelta` duration value.
+    TimeDelta(TimeDelta),
+    /// A fixed-offset `datetime.timezone` value.
+    TimeZone(TimeZone),
     /// A slice object (e.g., `slice(1, 10, 2)` or from `x[1:10:2]`).
     ///
     /// Stored on the heap to keep `Value` enum small. Slice objects represent
@@ -207,6 +216,10 @@ impl HeapData {
             Self::Str(_)
             | Self::Bytes(_)
             | Self::Range(_)
+            | Self::Date(_)
+            | Self::DateTime(_)
+            | Self::TimeDelta(_)
+            | Self::TimeZone(_)
             | Self::Slice(_)
             | Self::Exception(_)
             | Self::LongInt(_)
@@ -280,6 +293,30 @@ impl HeapData {
                 range.step.hash(&mut hasher);
                 Some(hasher.finish())
             }
+            Self::Date(date) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                date.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::DateTime(dt) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                dt.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::TimeDelta(delta) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                delta.hash(&mut hasher);
+                Some(hasher.finish())
+            }
+            Self::TimeZone(tz) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                tz.hash(&mut hasher);
+                Some(hasher.finish())
+            }
             // Dataclass hashability depends on the mutable flag
             Self::Dataclass(dc) => dc.compute_hash(heap, interns),
             // Slices are immutable and hashable (like in CPython)
@@ -333,6 +370,10 @@ impl PyTrait for HeapData {
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => Type::Function,
             Self::Cell(_) => Type::Cell,
             Self::Range(_) => Type::Range,
+            Self::Date(_) => Type::Date,
+            Self::DateTime(_) => Type::DateTime,
+            Self::TimeDelta(_) => Type::TimeDelta,
+            Self::TimeZone(_) => Type::TimeZone,
             Self::Slice(_) => Type::Slice,
             Self::Exception(e) => e.py_type(),
             Self::Dataclass(dc) => dc.py_type(heap),
@@ -359,6 +400,10 @@ impl PyTrait for HeapData {
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => 0,
             Self::Cell(v) => std::mem::size_of::<Value>() + v.py_estimate_size(),
             Self::Range(_) => std::mem::size_of::<Range>(),
+            Self::Date(d) => d.py_estimate_size(),
+            Self::DateTime(dt) => dt.py_estimate_size(),
+            Self::TimeDelta(delta) => delta.py_estimate_size(),
+            Self::TimeZone(tz) => tz.py_estimate_size(),
             Self::Slice(s) => s.py_estimate_size(),
             Self::Exception(e) => std::mem::size_of::<SimpleException>() + e.arg().map_or(0, String::len),
             Self::Dataclass(dc) => dc.py_estimate_size(),
@@ -395,6 +440,10 @@ impl PyTrait for HeapData {
             Self::Cell(_)
             | Self::Closure(_, _, _)
             | Self::FunctionDefaults(_, _)
+            | Self::Date(_)
+            | Self::DateTime(_)
+            | Self::TimeDelta(_)
+            | Self::TimeZone(_)
             | Self::Slice(_)
             | Self::Exception(_)
             | Self::Dataclass(_)
@@ -445,6 +494,10 @@ impl PyTrait for HeapData {
             }
             (Self::FunctionDefaults(a_id, _), Self::FunctionDefaults(b_id, _)) => Ok(*a_id == *b_id),
             (Self::Range(a), Self::Range(b)) => a.py_eq(b, heap, guard, interns),
+            (Self::Date(a), Self::Date(b)) => a.py_eq(b, heap, guard, interns),
+            (Self::DateTime(a), Self::DateTime(b)) => a.py_eq(b, heap, guard, interns),
+            (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_eq(b, heap, guard, interns),
+            (Self::TimeZone(a), Self::TimeZone(b)) => a.py_eq(b, heap, guard, interns),
             (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, heap, guard, interns),
             // LongInt equality
             (Self::LongInt(a), Self::LongInt(b)) => Ok(a == b),
@@ -460,6 +513,21 @@ impl PyTrait for HeapData {
             | (Self::Coroutine(_), Self::Coroutine(_))
             | (Self::GatherFuture(_), Self::GatherFuture(_)) => Ok(false),
             _ => Ok(false), // Different types are never equal
+        }
+    }
+
+    fn py_cmp(
+        &self,
+        other: &Self,
+        heap: &mut Heap<impl ResourceTracker>,
+        guard: &mut DepthGuard,
+        interns: &Interns,
+    ) -> Result<Option<Ordering>, ResourceError> {
+        match (self, other) {
+            (Self::Date(a), Self::Date(b)) => a.py_cmp(b, heap, guard, interns),
+            (Self::DateTime(a), Self::DateTime(b)) => a.py_cmp(b, heap, guard, interns),
+            (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_cmp(b, heap, guard, interns),
+            _ => Ok(None),
         }
     }
 
@@ -512,7 +580,15 @@ impl PyTrait for HeapData {
                 }
             }
             // Range, Slice, Exception, LongInt, and Path have no nested heap references
-            Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) | Self::Path(_) => {}
+            Self::Range(_)
+            | Self::Date(_)
+            | Self::DateTime(_)
+            | Self::TimeDelta(_)
+            | Self::TimeZone(_)
+            | Self::Slice(_)
+            | Self::Exception(_)
+            | Self::LongInt(_)
+            | Self::Path(_) => {}
         }
     }
 
@@ -529,6 +605,10 @@ impl PyTrait for HeapData {
             Self::Closure(_, _, _) | Self::FunctionDefaults(_, _) => true,
             Self::Cell(_) => true, // Cells are always truthy
             Self::Range(r) => r.py_bool(heap, interns),
+            Self::Date(d) => d.py_bool(heap, interns),
+            Self::DateTime(dt) => dt.py_bool(heap, interns),
+            Self::TimeDelta(delta) => delta.py_bool(heap, interns),
+            Self::TimeZone(tz) => tz.py_bool(heap, interns),
             Self::Slice(s) => s.py_bool(heap, interns),
             Self::Exception(_) => true, // Exceptions are always truthy
             Self::Dataclass(dc) => dc.py_bool(heap, interns),
@@ -564,6 +644,10 @@ impl PyTrait for HeapData {
             // Cell repr shows the contained value's type
             Self::Cell(v) => write!(f, "<cell: {} object>", v.py_type(heap)),
             Self::Range(r) => r.py_repr_fmt(f, heap, heap_ids, guard, interns),
+            Self::Date(d) => d.py_repr_fmt(f, heap, heap_ids, guard, interns),
+            Self::DateTime(dt) => dt.py_repr_fmt(f, heap, heap_ids, guard, interns),
+            Self::TimeDelta(delta) => delta.py_repr_fmt(f, heap, heap_ids, guard, interns),
+            Self::TimeZone(tz) => tz.py_repr_fmt(f, heap, heap_ids, guard, interns),
             Self::Slice(s) => s.py_repr_fmt(f, heap, heap_ids, guard, interns),
             Self::Exception(e) => e.py_repr_fmt(f),
             Self::Dataclass(dc) => dc.py_repr_fmt(f, heap, heap_ids, guard, interns),
@@ -589,6 +673,11 @@ impl PyTrait for HeapData {
         match self {
             // Strings return their value directly without quotes
             Self::Str(s) => s.py_str(heap, guard, interns),
+            // Datetime module scalar types define dedicated __str__ behavior.
+            Self::Date(d) => d.py_str(heap, guard, interns),
+            Self::DateTime(dt) => dt.py_str(heap, guard, interns),
+            Self::TimeDelta(delta) => delta.py_str(heap, guard, interns),
+            Self::TimeZone(tz) => tz.py_str(heap, guard, interns),
             // LongInt returns its string representation
             Self::LongInt(li) => Cow::Owned(li.to_string()),
             // Exceptions return just the message (or empty string if no message)
@@ -612,6 +701,11 @@ impl PyTrait for HeapData {
             (Self::List(a), Self::List(b)) => a.py_add(b, heap, interns),
             (Self::Tuple(a), Self::Tuple(b)) => a.py_add(b, heap, interns),
             (Self::Dict(a), Self::Dict(b)) => a.py_add(b, heap, interns),
+            (Self::Date(a), Self::TimeDelta(b)) => (*a).py_add(b, heap, interns),
+            (Self::DateTime(a), Self::TimeDelta(b)) => a.py_add(b, heap, interns),
+            (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_add(b, heap, interns),
+            (Self::TimeDelta(a), Self::Date(b)) => (*b).py_add(a, heap, interns),
+            (Self::TimeDelta(a), Self::DateTime(b)) => b.py_add(a, heap, interns),
             // Cells and Dataclasses don't support arithmetic operations
             _ => Ok(None),
         }
@@ -630,6 +724,11 @@ impl PyTrait for HeapData {
             (Self::Dict(a), Self::Dict(b)) => a.py_sub(b, heap),
             (Self::Set(a), Self::Set(b)) => a.py_sub(b, heap),
             (Self::FrozenSet(a), Self::FrozenSet(b)) => a.py_sub(b, heap),
+            (Self::Date(a), Self::Date(b)) => (*a).py_sub_date(*b, heap),
+            (Self::Date(a), Self::TimeDelta(b)) => (*a).py_sub(b, heap),
+            (Self::DateTime(a), Self::DateTime(b)) => a.py_sub(b, heap),
+            (Self::DateTime(a), Self::TimeDelta(b)) => a.py_sub_timedelta(b, heap),
+            (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_sub(b, heap),
             // Cells don't support arithmetic operations
             _ => Ok(None),
         }
@@ -709,6 +808,7 @@ impl PyTrait for HeapData {
             Self::FrozenSet(fs) => fs.py_call_attr(heap, attr, args, interns),
             Self::Dataclass(dc) => dc.py_call_attr(heap, attr, args, interns),
             Self::Path(p) => p.py_call_attr(heap, attr, args, interns),
+            Self::TimeDelta(delta) => delta.py_call_attr(heap, attr, args, interns),
             _ => Err(ExcType::attribute_error(self.py_type(heap), attr.as_str(interns))),
         }
     }
@@ -779,6 +879,7 @@ impl PyTrait for HeapData {
             Self::Slice(s) => s.py_getattr(attr_id, heap, interns),
             Self::Exception(exc) => exc.py_getattr(attr_id, heap, interns),
             Self::Path(p) => p.py_getattr(attr_id, heap, interns),
+            Self::DateTime(dt) => dt.py_getattr(attr_id, heap, interns),
             // All other types don't support attribute access via py_getattr
             _ => Ok(None),
         }
@@ -814,6 +915,10 @@ impl HashState {
             | HeapData::Closure(_, _, _)
             | HeapData::FunctionDefaults(_, _)
             | HeapData::Range(_)
+            | HeapData::Date(_)
+            | HeapData::DateTime(_)
+            | HeapData::TimeDelta(_)
+            | HeapData::TimeZone(_)
             | HeapData::Slice(_)
             | HeapData::LongInt(_) => Self::Unknown,
             // Dataclass hashability depends on the mutable flag
@@ -1715,6 +1820,10 @@ fn collect_child_ids(data: &HeapData, work_list: &mut Vec<HeapId>) {
         HeapData::Str(_)
         | HeapData::Bytes(_)
         | HeapData::Range(_)
+        | HeapData::Date(_)
+        | HeapData::DateTime(_)
+        | HeapData::TimeDelta(_)
+        | HeapData::TimeZone(_)
         | HeapData::Exception(_)
         | HeapData::LongInt(_)
         | HeapData::Slice(_)

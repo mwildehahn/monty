@@ -17,6 +17,7 @@ use crate::{
 };
 
 pub(crate) mod asyncio;
+pub(crate) mod datetime;
 pub(crate) mod os;
 pub(crate) mod pathlib;
 pub(crate) mod sys;
@@ -36,6 +37,8 @@ pub(crate) enum BuiltinModule {
     Pathlib,
     /// The `os` module providing operating system interface (only `getenv()` implemented).
     Os,
+    /// The `datetime` module providing date/time objects and arithmetic.
+    Datetime,
 }
 
 impl BuiltinModule {
@@ -47,6 +50,7 @@ impl BuiltinModule {
             StaticStrings::Asyncio => Some(Self::Asyncio),
             StaticStrings::Pathlib => Some(Self::Pathlib),
             StaticStrings::Os => Some(Self::Os),
+            StaticStrings::Datetime => Some(Self::Datetime),
             _ => None,
         }
     }
@@ -65,6 +69,7 @@ impl BuiltinModule {
             Self::Asyncio => asyncio::create_module(heap, interns),
             Self::Pathlib => pathlib::create_module(heap, interns),
             Self::Os => os::create_module(heap, interns),
+            Self::Datetime => datetime::create_module(heap, interns),
         }
     }
 }

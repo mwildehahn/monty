@@ -7,6 +7,8 @@
 /// types, enabling efficient dispatch via `enum_dispatch`.
 pub mod bytes;
 pub mod dataclass;
+pub mod date;
+pub mod datetime;
 pub mod dict;
 pub mod iter;
 pub mod list;
@@ -20,11 +22,15 @@ pub mod range;
 pub mod set;
 pub mod slice;
 pub mod str;
+pub mod timedelta;
+pub mod timezone;
 pub mod tuple;
 pub mod r#type;
 
 pub(crate) use bytes::Bytes;
 pub(crate) use dataclass::Dataclass;
+pub(crate) use date::Date;
+pub(crate) use datetime::DateTime;
 pub(crate) use dict::Dict;
 pub(crate) use iter::MontyIter;
 pub(crate) use list::List;
@@ -38,5 +44,7 @@ pub(crate) use range::Range;
 pub(crate) use set::{FrozenSet, Set};
 pub(crate) use slice::Slice;
 pub(crate) use str::Str;
+pub(crate) use timedelta::TimeDelta;
+pub(crate) use timezone::TimeZone;
 pub(crate) use tuple::{Tuple, allocate_tuple};
 pub(crate) use r#type::Type;

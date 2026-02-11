@@ -4,7 +4,7 @@ use super::VM;
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
-    heap::HeapGuard,
+    heap::{HeapData, HeapGuard},
     resource::ResourceTracker,
     types::PyTrait,
     value::BitwiseOp,
@@ -54,6 +54,12 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                 Ok(())
             }
             Ok(None) => {
+                if let (Some(lhs_aware), Some(rhs_aware)) =
+                    (datetime_awareness(lhs, this.heap), datetime_awareness(rhs, this.heap))
+                    && lhs_aware != rhs_aware
+                {
+                    return Err(ExcType::datetime_subtract_naive_aware_error());
+                }
                 let lhs_type = lhs.py_type(this.heap);
                 let rhs_type = rhs.py_type(this.heap);
                 Err(ExcType::binary_type_error("-", lhs_type, rhs_type))
@@ -251,5 +257,18 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         lhs.drop_with_heap(self.heap);
         rhs.drop_with_heap(self.heap);
         Err(ExcType::not_implemented("matrix multiplication (@) is not supported").into())
+    }
+}
+
+/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
+///
+/// Returns `None` when the value is not a datetime reference.
+fn datetime_awareness(value: &crate::value::Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> Option<bool> {
+    let crate::value::Value::Ref(id) = value else {
+        return None;
+    };
+    match heap.get(*id) {
+        HeapData::DateTime(dt) => Some(dt.is_aware()),
+        _ => None,
     }
 }

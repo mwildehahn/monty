@@ -25,7 +25,7 @@ use crate::{
         check_repeat_size,
     },
     types::{
-        AttrCallResult, LongInt, Property, PyTrait, Str, Type,
+        AttrCallResult, LongInt, Property, PyTrait, Str, TimeZone, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
         path,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
@@ -587,7 +587,7 @@ impl PyTrait for Value {
                         }
                     })
                 } else {
-                    Ok(None)
+                    heap.with_two(*id1, *id2, |heap, left, right| left.py_sub(right, heap))
                 }
             }
             // Float - Float
@@ -1740,6 +1740,11 @@ impl Value {
                     let name_str = t.to_string();
                     let str_id = heap.allocate(HeapData::Str(Str::from(name_str)))?;
                     return Ok(AttrCallResult::Value(Self::Ref(str_id)));
+                }
+                // `datetime.timezone.utc` class attribute.
+                if *t == Type::TimeZone && name_id == StaticStrings::Utc {
+                    let tz_id = heap.allocate(HeapData::TimeZone(TimeZone::utc()))?;
+                    return Ok(AttrCallResult::Value(Self::Ref(tz_id)));
                 }
             }
             _ => {}
