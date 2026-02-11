@@ -1,38 +1,26 @@
+import _ast
 import _sitebuiltins
+import _typeshed
 import sys
 import types
 from _collections_abc import dict_items, dict_keys, dict_values
-from collections.abc import Awaitable, Callable, Iterable, Iterator, MutableSet, Reversible, Set as AbstractSet, Sized
-from types import GenericAlias, TracebackType
-from typing import (
-    Any,
-    ClassVar,
-    Final,
-    Generic,
-    MutableMapping,
-    MutableSequence,
-    Protocol,
-    Sequence,
-    SupportsAbs,
-    SupportsBytes,
-    SupportsFloat,
-    SupportsIndex,
-    TypeVar,
-    final,
-    overload,
-    type_check_only,
-)
-
-import _typeshed
 from _typeshed import (
     AnnotationForm,
     ConvertibleToFloat,
     ConvertibleToInt,
+    FileDescriptorOrPath,
+    OpenBinaryMode,
+    OpenBinaryModeReading,
+    OpenBinaryModeUpdating,
+    OpenBinaryModeWriting,
+    OpenTextMode,
     ReadableBuffer,
     SupportsAdd,
+    SupportsAiter,
     SupportsAnext,
     SupportsDivMod,
     SupportsFlush,
+    SupportsIter,
     SupportsKeysAndGetItem,
     SupportsLenAndGetItem,
     SupportsNext,
@@ -42,12 +30,41 @@ from _typeshed import (
     SupportsRichComparisonT,
     SupportsWrite,
 )
+from collections.abc import Awaitable, Callable, Iterable, Iterator, MutableSet, Reversible, Set as AbstractSet, Sized
+from io import BufferedRandom, BufferedReader, BufferedWriter, FileIO, TextIOWrapper
+from os import PathLike
+from types import CellType, CodeType, GenericAlias, TracebackType
+from typing import (
+    IO,
+    Any,
+    BinaryIO,
+    ClassVar,
+    Final,
+    Generic,
+    Mapping,
+    MutableMapping,
+    MutableSequence,
+    Protocol,
+    Sequence,
+    SupportsAbs,
+    SupportsBytes,
+    SupportsComplex,
+    SupportsFloat,
+    SupportsIndex,
+    TypeVar,
+    final,
+    overload,
+    type_check_only,
+)
 from typing_extensions import (
+    Concatenate,
     Literal,
     LiteralString,
     ParamSpec,
     Self,
     TypeAlias,
+    TypeGuard,
+    TypeIs,
     TypeVarTuple,
     deprecated,
     disjoint_base,
@@ -1023,8 +1040,8 @@ class property:
 def abs(x: SupportsAbs[_T], /) -> _T: ...
 def all(iterable: Iterable[object], /) -> bool: ...
 def any(iterable: Iterable[object], /) -> bool: ...
-def bin(number: int | SupportsIndex, /) -> str: ...
-def chr(i: int | SupportsIndex, /) -> str: ...
+def bin(number: SupportsIndex, /) -> str: ...
+def chr(i: SupportsIndex, /) -> str: ...
 
 if sys.version_info >= (3, 10):
     @type_check_only
@@ -1045,7 +1062,7 @@ def hash(obj: object, /) -> int: ...
 
 help: _sitebuiltins._Helper
 
-def hex(number: int | SupportsIndex, /) -> str: ...
+def hex(number: SupportsIndex, /) -> str: ...
 def id(obj: object, /) -> int: ...
 @type_check_only
 class _GetItemIterable(Protocol[_T_co]):
@@ -1093,7 +1110,7 @@ def min(
 ) -> SupportsRichComparisonT | _T: ...
 @overload
 def min(iterable: Iterable[_T1], /, *, key: Callable[[_T1], SupportsRichComparison], default: _T2) -> _T1 | _T2: ...
-def oct(number: int | SupportsIndex, /) -> str: ...
+def oct(number: SupportsIndex, /) -> str: ...
 
 _Opener: TypeAlias = Callable[[str, int], int]
 

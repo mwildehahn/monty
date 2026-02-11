@@ -29,6 +29,7 @@ OsFunction = Literal[
     'Path.absolute',
     'os.getenv',
     'os.environ',
+    'datetime.now',
 ]
 
 
@@ -172,6 +173,8 @@ class AbstractOS(ABC):
                 return self.getenv(*args)
             case 'os.environ':
                 return self.get_environ()
+            case 'datetime.now':
+                return self.datetime_now()
 
     @abstractmethod
     def path_exists(self, path: PurePosixPath) -> bool:
@@ -419,6 +422,17 @@ class AbstractOS(ABC):
 
         Returns:
             A dictionary containing all environment variables.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def datetime_now(self) -> tuple[float, int]:
+        """Get current UTC timestamp and local UTC offset seconds.
+
+        Returns:
+            A tuple of `(timestamp_utc, local_offset_seconds)` where:
+            - `timestamp_utc` is Unix seconds since epoch in UTC
+            - `local_offset_seconds` is the local UTC offset at that instant
         """
         raise NotImplementedError
 
@@ -878,6 +892,14 @@ class OSAccess(AbstractOS):
 
     def get_environ(self) -> dict[str, str]:
         return self.environ
+
+    def datetime_now(self) -> tuple[float, int]:
+        import datetime
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        local_offset = now_utc.astimezone().utcoffset()
+        offset_seconds = int(local_offset.total_seconds()) if local_offset is not None else 0
+        return now_utc.timestamp(), offset_seconds
 
     def _get_entry(self, path: PurePosixPath) -> Tree | AbstractFile | None:
         dir = self._tree
