@@ -9,6 +9,7 @@ This script runs datetime calculations inside the Monty sandbox and prints:
 
 from __future__ import annotations
 
+import datetime
 from typing import cast
 
 import pydantic_monty
@@ -92,6 +93,12 @@ first_monday_next_month = first_of_next_month + datetime.timedelta(days=first_mo
 """
 
 
+def format_fixed_pst_12h(iso_datetime: str) -> str:
+    """Format an ISO datetime string as 12-hour PST text."""
+    value = datetime.datetime.fromisoformat(iso_datetime)
+    return value.strftime('%Y-%m-%d %I:%M:%S %p PST')
+
+
 def main() -> None:
     """Execute datetime calculations in Monty and print the computed schedule."""
     runner = pydantic_monty.Monty(MONTY_CODE, script_name='datetime_planning.py')
@@ -101,8 +108,8 @@ def main() -> None:
     print('Datetime planning from Monty:')
     print(f'timezone: {result["timezone"]}')
     print(f'today: {result["today"]}')
-    print(f'in_one_hour: {result["in_one_hour"]}')
-    print(f'next_thursday_3pm: {result["next_thursday_3pm"]}')
+    print(f'in_one_hour: {format_fixed_pst_12h(result["in_one_hour"])}')
+    print(f'next_thursday_3pm: {format_fixed_pst_12h(result["next_thursday_3pm"])}')
     print(f'first_monday_next_month: {result["first_monday_next_month"]}')
 
 
