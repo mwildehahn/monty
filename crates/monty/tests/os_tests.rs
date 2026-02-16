@@ -4,7 +4,7 @@
 //! `RunProgress::OsCall` with the correct `OsFunction` variant and arguments,
 //! and that return values are correctly used by Python code.
 
-use monty::{MontyObject, MontyRun, NoLimitTracker, OsFunction, PrintWriter, RunProgress, file_stat};
+use monty::{ExcType, MontyObject, MontyRun, NoLimitTracker, OsFunction, PrintWriter, RunProgress, file_stat};
 
 /// Helper to run code and extract the OsCall progress.
 ///
@@ -64,6 +64,30 @@ fn run_oscall_with_result(code: &str, mock_result: MontyObject) -> (OsFunction, 
         }
         _ => panic!("expected OsCall, got {progress:?}"),
     }
+}
+
+/// Helper that resumes `datetime.now()` with an invalid payload and asserts the runtime error.
+fn assert_datetime_now_payload_error(mock_result: MontyObject, expected_message: &str) {
+    let runner = MontyRun::new(
+        "import datetime\ndatetime.datetime.now()".to_owned(),
+        "test.py",
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
+    let RunProgress::OsCall {
+        function, args, state, ..
+    } = progress
+    else {
+        panic!("expected OsCall");
+    };
+    assert_eq!(function, OsFunction::DateTimeNow);
+    assert!(args.is_empty());
+
+    let exc = state.run(mock_result, &mut PrintWriter::Stdout).unwrap_err();
+    assert_eq!(exc.exc_type(), ExcType::RuntimeError);
+    assert_eq!(exc.message(), Some(expected_message));
 }
 
 // =============================================================================
@@ -418,8 +442,7 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
     // Consume and resume the original snapshot so ref-count-panic mode does not
     // treat dropping internal Value::Ref entries as a leak in this test harness path.
     let RunProgress::OsCall {
-        state: original_state,
-        ..
+        state: original_state, ..
     } = progress
     else {
         panic!("expected OsCall");
@@ -455,6 +478,57 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
             month: 11,
             day: 14,
         }
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_non_tuple() {
+    assert_datetime_now_payload_error(
+        MontyObject::Int(1),
+        "invalid return type: datetime.now callback must return a 2-tuple",
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_wrong_arity() {
+    assert_datetime_now_payload_error(
+        MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0)]),
+        "invalid return type: datetime.now callback must return exactly two values",
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_non_float_timestamp() {
+    assert_datetime_now_payload_error(
+        MontyObject::Tuple(vec![MontyObject::Int(1_700_000_000), MontyObject::Int(0)]),
+        "invalid return type: datetime.now timestamp must be a float",
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_non_finite_timestamp() {
+    assert_datetime_now_payload_error(
+        MontyObject::Tuple(vec![MontyObject::Float(f64::INFINITY), MontyObject::Int(0)]),
+        "invalid return type: datetime.now timestamp must be finite",
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_non_int_offset() {
+    assert_datetime_now_payload_error(
+        MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Float(1.0)]),
+        "invalid return type: datetime.now local offset must be an integer fitting i32",
+    );
+}
+
+#[test]
+fn datetime_now_resume_payload_rejects_out_of_range_offset() {
+    assert_datetime_now_payload_error(
+        MontyObject::Tuple(vec![
+            MontyObject::Float(1_700_000_000.0),
+            MontyObject::Int(i64::from(i32::MAX) + 1),
+        ]),
+        "invalid return type: datetime.now local offset must be an integer fitting i32",
     );
 }
 

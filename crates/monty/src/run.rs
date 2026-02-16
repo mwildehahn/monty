@@ -424,9 +424,12 @@ impl<T: ResourceTracker> Snapshot<T> {
         let resume_action = match ext_result {
             ExternalResult::Return(obj) => {
                 if let Some(transform) = self.pending_os_transform {
-                    let value = transform_os_return_value(obj, transform, &mut self.heap)
-                        .map_err(|msg| MontyException::runtime_error(format!("invalid return type: {msg}")))?;
-                    ResumeAction::ReturnValue(value)
+                    match transform_os_return_value(obj, transform, &mut self.heap) {
+                        Ok(value) => ResumeAction::ReturnValue(value),
+                        Err(msg) => ResumeAction::Error(RunError::from(MontyException::runtime_error(format!(
+                            "invalid return type: {msg}"
+                        )))),
+                    }
                 } else {
                     ResumeAction::ReturnObj(obj)
                 }

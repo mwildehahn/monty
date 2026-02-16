@@ -465,7 +465,7 @@ os.getenv = _virtual_getenv
 # =============================================================================
 
 _FIXED_TIMESTAMP_UTC = 1_700_000_000.0
-_FIXED_LOCAL_OFFSET_SECONDS = 0
+_FIXED_LOCAL_OFFSET_SECONDS = 7_200
 _ORIGINAL_DATE_CLASS = datetime_module.date
 _ORIGINAL_DATETIME_CLASS = datetime_module.datetime
 

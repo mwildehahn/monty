@@ -817,7 +817,9 @@ fn dispatch_os_call(
     }
     if function == OsFunction::DateTimeNow {
         // Deterministic fixture for datetime/date "now" tests.
-        return MontyObject::Tuple(vec![MontyObject::Float(VFS_MTIME), MontyObject::Int(0)]).into();
+        // The +02:00 local offset intentionally crosses midnight so
+        // date.today()/datetime.now(tz=None) boundary behavior is covered.
+        return MontyObject::Tuple(vec![MontyObject::Float(VFS_MTIME), MontyObject::Int(7_200)]).into();
     }
 
     // Extract path from MontyObject::Path (or String for backwards compatibility)
