@@ -15,12 +15,14 @@ use crate::{
     intern::Interns,
     resource::{DepthGuard, ResourceError, ResourceTracker},
     types::{
-        Date, DateTime, LongInt, NamedTuple, Path, PyTrait, TimeDelta, TimeZone, Type, allocate_tuple,
+        LongInt, NamedTuple, Path, PyTrait, TimeZone, Type, allocate_tuple,
         bytes::{Bytes, bytes_repr},
+        date as date_type, datetime as datetime_type,
         dict::Dict,
         list::List,
         set::{FrozenSet, Set},
         str::{Str, StringRepr, string_repr_fmt},
+        timedelta as timedelta_type,
     },
     value::{EitherStr, Value},
 };
@@ -310,9 +312,9 @@ impl MontyObject {
                 Ok(Value::Ref(heap.allocate(HeapData::FrozenSet(frozenset))?))
             }
             Self::Date { year, month, day } => {
-                let date = Date::from_ymd(year, i32::from(month), i32::from(day))
+                let value = date_type::from_ymd(year, i32::from(month), i32::from(day))
                     .map_err(|_| InvalidInputError::invalid_type("date"))?;
-                Ok(Value::Ref(heap.allocate(HeapData::Date(date))?))
+                Ok(Value::Ref(heap.allocate(HeapData::Date(value))?))
             }
             Self::DateTime {
                 year,
@@ -328,7 +330,7 @@ impl MontyObject {
                     .map(|offset| TimeZone::new(offset, None))
                     .transpose()
                     .map_err(|_| InvalidInputError::invalid_type("datetime"))?;
-                let datetime = DateTime::from_components(
+                let value = datetime_type::from_components(
                     year,
                     i32::from(month),
                     i32::from(day),
@@ -339,14 +341,14 @@ impl MontyObject {
                     tzinfo,
                 )
                 .map_err(|_| InvalidInputError::invalid_type("datetime"))?;
-                Ok(Value::Ref(heap.allocate(HeapData::DateTime(datetime))?))
+                Ok(Value::Ref(heap.allocate(HeapData::DateTime(value))?))
             }
             Self::TimeDelta {
                 days,
                 seconds,
                 microseconds,
             } => {
-                let delta = TimeDelta::new(days, seconds, microseconds)
+                let delta = timedelta_type::new(days, seconds, microseconds)
                     .map_err(|_| InvalidInputError::invalid_type("timedelta"))?;
                 Ok(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?))
             }
@@ -514,7 +516,7 @@ impl MontyObject {
                         Self::Repr(s)
                     }
                     HeapData::Date(date) => {
-                        let (year, month, day) = date.to_ymd();
+                        let (year, month, day) = date_type::to_ymd(*date);
                         Self::Date {
                             year,
                             month: u8::try_from(month).expect("month is always 1..=12"),
@@ -522,7 +524,9 @@ impl MontyObject {
                         }
                     }
                     HeapData::DateTime(datetime) => {
-                        if let Some((year, month, day, hour, minute, second, microsecond)) = datetime.to_components() {
+                        if let Some((year, month, day, hour, minute, second, microsecond)) =
+                            datetime_type::to_components(datetime)
+                        {
                             Self::DateTime {
                                 year,
                                 month,
@@ -531,17 +535,20 @@ impl MontyObject {
                                 minute,
                                 second,
                                 microsecond,
-                                offset_seconds: datetime.offset_seconds,
+                                offset_seconds: datetime_type::offset_seconds(datetime),
                             }
                         } else {
                             Self::Repr(object.py_repr(heap, guard, interns).into_owned())
                         }
                     }
-                    HeapData::TimeDelta(delta) => Self::TimeDelta {
-                        days: delta.days,
-                        seconds: delta.seconds,
-                        microseconds: delta.microseconds,
-                    },
+                    HeapData::TimeDelta(delta) => {
+                        let (days, seconds, microseconds) = timedelta_type::components(delta);
+                        Self::TimeDelta {
+                            days,
+                            seconds,
+                            microseconds,
+                        }
+                    }
                     HeapData::TimeZone(tz) => Self::TimeZone {
                         offset_seconds: tz.offset_seconds,
                         name: tz.name.clone(),

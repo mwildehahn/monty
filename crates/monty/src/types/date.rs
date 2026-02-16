@@ -1,12 +1,13 @@
 //! Python `datetime.date` implementation.
 //!
-//! Dates are stored as proleptic Gregorian ordinals (`1 == 0001-01-01`) which
-//! keeps arithmetic and comparisons simple and deterministic.
+//! Monty stores dates with `speedate::Date` and keeps CPython-compatible
+//! constructor validation and arithmetic behavior.
 
 use std::fmt::Write;
 
 use ahash::AHashSet;
-use chrono::{Datelike, NaiveDate};
+use serde::{Deserialize, Serialize};
+use speedate::{DateConfigBuilder, TimestampUnit};
 
 use crate::{
     args::ArgValues,
@@ -16,157 +17,213 @@ use crate::{
     intern::Interns,
     os::OsFunction,
     resource::{DepthGuard, ResourceError, ResourceTracker},
-    types::{AttrCallResult, PyTrait, TimeDelta, Type},
+    types::{AttrCallResult, PyTrait, TimeDelta, Type, timedelta},
     value::Value,
 };
 
-/// Python `datetime.date` value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Date {
-    /// Proleptic Gregorian ordinal (`1 == 0001-01-01`).
-    pub ordinal: i32,
+/// `datetime.date` storage backed directly by `speedate`.
+pub(crate) type Date = speedate::Date;
+
+/// Creates a date from validated civil components.
+pub(crate) fn from_ymd(year: i32, month: i32, day: i32) -> RunResult<Date> {
+    if !(1..=9999).contains(&year) {
+        return Err(SimpleException::new_msg(ExcType::ValueError, format!("year {year} is out of range")).into());
+    }
+    if !(1..=12).contains(&month) {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
+    }
+    let Ok(day_u8) = u8::try_from(day) else {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
+    };
+    let month_u8 = u8::try_from(month).expect("month already validated");
+    if day_u8 == 0 || day_u8 > days_in_month(year, month_u8) {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
+    }
+    Ok(Date {
+        year: u16::try_from(year).expect("year validated to 1..=9999"),
+        month: month_u8,
+        day: day_u8,
+    })
 }
 
-impl Date {
-    /// Creates a date from validated civil components.
-    pub fn from_ymd(year: i32, month: i32, day: i32) -> RunResult<Self> {
-        if !(1..=9999).contains(&year) {
-            return Err(SimpleException::new_msg(ExcType::ValueError, format!("year {year} is out of range")).into());
+/// Creates a date from a proleptic Gregorian ordinal value.
+pub(crate) fn from_ordinal(ordinal: i32) -> RunResult<Date> {
+    let days_since_epoch = i64::from(ordinal) - 719_163;
+    let (year, month, day) = civil_from_days_since_unix_epoch(days_since_epoch);
+    if !(1..=9999).contains(&year) {
+        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
+    }
+    Ok(Date {
+        year: u16::try_from(year).expect("year range validated to 1..=9999"),
+        month,
+        day,
+    })
+}
+
+/// Returns the proleptic Gregorian ordinal (`1 == 0001-01-01`) for a date.
+#[must_use]
+pub(crate) fn to_ordinal(date: Date) -> i32 {
+    let days_since_epoch = days_since_unix_epoch(i32::from(date.year), date.month, date.day);
+    i32::try_from(days_since_epoch + 719_163).expect("supported year range ordinal always fits i32")
+}
+
+/// Returns civil components `(year, month, day)`.
+#[must_use]
+pub(crate) fn to_ymd(date: Date) -> (i32, u32, u32) {
+    (i32::from(date.year), u32::from(date.month), u32::from(date.day))
+}
+
+/// Creates a date from local wall-clock microseconds since Unix epoch.
+pub(crate) fn from_local_unix_micros(local_unix_micros: i64) -> RunResult<Date> {
+    let seconds = local_unix_micros.div_euclid(1_000_000);
+    let config = DateConfigBuilder::new().timestamp_unit(TimestampUnit::Second).build();
+    let date = Date::from_timestamp(seconds, false, &config)
+        .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "date value out of range"))?;
+    if date.year == 0 {
+        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
+    }
+    Ok(date)
+}
+
+#[must_use]
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[must_use]
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => unreachable!("month validated to 1..=12"),
+    }
+}
+
+/// Days since Unix epoch (`1970-01-01`) for a civil date.
+///
+/// Algorithm derived from Howard Hinnant's civil date formulas.
+#[must_use]
+fn days_since_unix_epoch(year: i32, month: u8, day: u8) -> i64 {
+    let mut year = i64::from(year);
+    let month = i64::from(month);
+    let day = i64::from(day);
+
+    year -= i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Civil date `(year, month, day)` from days since Unix epoch (`1970-01-01`).
+///
+/// Algorithm derived from Howard Hinnant's civil date formulas.
+#[must_use]
+fn civil_from_days_since_unix_epoch(days_since_epoch: i64) -> (i32, u8, u8) {
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096).div_euclid(365);
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2).div_euclid(153);
+    let day = day_of_year - (153 * month_prime + 2).div_euclid(5) + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+
+    (
+        i32::try_from(year).expect("calculated year fits i32"),
+        u8::try_from(month).expect("calculated month fits u8"),
+        u8::try_from(day).expect("calculated day fits u8"),
+    )
+}
+
+/// Constructor for `date(year, month, day)`.
+pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
+    let (pos, kwargs) = args.into_parts();
+    defer_drop_mut!(pos, heap);
+    let kwargs = kwargs.into_iter();
+    defer_drop_mut!(kwargs, heap);
+
+    let mut year: Option<i32> = None;
+    let mut month: Option<i32> = None;
+    let mut day: Option<i32> = None;
+
+    for (index, arg) in pos.by_ref().enumerate() {
+        defer_drop!(arg, heap);
+        match index {
+            0 => year = Some(value_to_i32(arg, heap)?),
+            1 => month = Some(value_to_i32(arg, heap)?),
+            2 => day = Some(value_to_i32(arg, heap)?),
+            _ => return Err(ExcType::type_error_at_most("date", 3, index + 1)),
         }
-        if !(1..=12).contains(&month) {
-            return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
-        }
-        let month_u32 = u32::try_from(month).expect("month already validated");
-        let day_u32 = u32::try_from(day).ok();
-        let Some(day_u32) = day_u32 else {
-            return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
-        };
-        let Some(date) = NaiveDate::from_ymd_opt(year, month_u32, day_u32) else {
-            return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
-        };
-        Ok(Self {
-            ordinal: date.num_days_from_ce(),
-        })
     }
 
-    /// Creates a date from an ordinal value.
-    pub fn from_ordinal(ordinal: i32) -> RunResult<Self> {
-        let Some(date) = NaiveDate::from_num_days_from_ce_opt(ordinal) else {
-            return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
+    for (key, value) in kwargs {
+        defer_drop!(key, heap);
+        defer_drop!(value, heap);
+
+        let Some(key_name) = key.as_either_str(heap) else {
+            return Err(ExcType::type_error_kwargs_nonstring_key());
         };
-        if !(1..=9999).contains(&date.year()) {
-            return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
-        }
-        Ok(Self { ordinal })
-    }
-
-    /// Returns civil components `(year, month, day)`.
-    #[must_use]
-    pub fn to_ymd(self) -> (i32, u32, u32) {
-        let date = NaiveDate::from_num_days_from_ce_opt(self.ordinal).expect("stored ordinal is always valid");
-        (date.year(), date.month(), date.day())
-    }
-
-    /// Creates a date from local wall-clock microseconds since Unix epoch.
-    pub fn from_local_unix_micros(local_unix_micros: i64) -> RunResult<Self> {
-        let seconds = local_unix_micros.div_euclid(1_000_000);
-        let micros = local_unix_micros.rem_euclid(1_000_000);
-        let micros_u32 = u32::try_from(micros).expect("rem_euclid keeps micros in range");
-        let nanos = micros_u32 * 1_000;
-        let Some(dt) = chrono::DateTime::from_timestamp(seconds, nanos) else {
-            return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
-        };
-        let date = dt.date_naive();
-        Self::from_ymd(
-            date.year(),
-            i32::try_from(date.month()).expect("month fits i32"),
-            i32::try_from(date.day()).expect("day fits i32"),
-        )
-    }
-
-    /// Constructor for `date(year, month, day)`.
-    pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
-        let (pos, kwargs) = args.into_parts();
-        defer_drop_mut!(pos, heap);
-        let kwargs = kwargs.into_iter();
-        defer_drop_mut!(kwargs, heap);
-
-        let mut year: Option<i32> = None;
-        let mut month: Option<i32> = None;
-        let mut day: Option<i32> = None;
-
-        for (index, arg) in pos.by_ref().enumerate() {
-            defer_drop!(arg, heap);
-            match index {
-                0 => year = Some(value_to_i32(arg, heap)?),
-                1 => month = Some(value_to_i32(arg, heap)?),
-                2 => day = Some(value_to_i32(arg, heap)?),
-                _ => return Err(ExcType::type_error_at_most("date", 3, index + 1)),
+        let key_name = key_name.as_str(interns);
+        match key_name {
+            "year" => {
+                if year.is_some() {
+                    return Err(ExcType::type_error_multiple_values("date", "year"));
+                }
+                year = Some(value_to_i32(value, heap)?);
             }
-        }
-
-        for (key, value) in kwargs {
-            defer_drop!(key, heap);
-            defer_drop!(value, heap);
-
-            let Some(key_name) = key.as_either_str(heap) else {
-                return Err(ExcType::type_error_kwargs_nonstring_key());
-            };
-            let key_name = key_name.as_str(interns);
-            match key_name {
-                "year" => {
-                    if year.is_some() {
-                        return Err(ExcType::type_error_multiple_values("date", "year"));
-                    }
-                    year = Some(value_to_i32(value, heap)?);
+            "month" => {
+                if month.is_some() {
+                    return Err(ExcType::type_error_multiple_values("date", "month"));
                 }
-                "month" => {
-                    if month.is_some() {
-                        return Err(ExcType::type_error_multiple_values("date", "month"));
-                    }
-                    month = Some(value_to_i32(value, heap)?);
-                }
-                "day" => {
-                    if day.is_some() {
-                        return Err(ExcType::type_error_multiple_values("date", "day"));
-                    }
-                    day = Some(value_to_i32(value, heap)?);
-                }
-                _ => return Err(ExcType::type_error_unexpected_keyword("date", key_name)),
+                month = Some(value_to_i32(value, heap)?);
             }
+            "day" => {
+                if day.is_some() {
+                    return Err(ExcType::type_error_multiple_values("date", "day"));
+                }
+                day = Some(value_to_i32(value, heap)?);
+            }
+            _ => return Err(ExcType::type_error_unexpected_keyword("date", key_name)),
         }
-
-        let Some(year) = year else {
-            return Err(ExcType::type_error_missing_positional_with_names(
-                "date",
-                &["year", "month", "day"],
-            ));
-        };
-        let Some(month) = month else {
-            return Err(ExcType::type_error_missing_positional_with_names(
-                "date",
-                &["month", "day"],
-            ));
-        };
-        let Some(day) = day else {
-            return Err(ExcType::type_error_missing_positional_with_names("date", &["day"]));
-        };
-
-        let date = Self::from_ymd(year, month, day)?;
-        Ok(Value::Ref(heap.allocate(HeapData::Date(date))?))
     }
 
-    /// Classmethod implementation for `date.today()`.
-    ///
-    /// This issues the shared `datetime.now` OS callback. The VM resume path uses the
-    /// encoded internal mode argument to convert the callback payload into a `date`.
-    pub fn class_today(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<AttrCallResult> {
-        args.check_zero_args("date.today", heap)?;
-        Ok(AttrCallResult::OsCall(
-            OsFunction::DateTimeNow,
-            ArgValues::One(Value::Int(0)),
-        ))
-    }
+    let Some(year) = year else {
+        return Err(ExcType::type_error_missing_positional_with_names(
+            "date",
+            &["year", "month", "day"],
+        ));
+    };
+    let Some(month) = month else {
+        return Err(ExcType::type_error_missing_positional_with_names(
+            "date",
+            &["month", "day"],
+        ));
+    };
+    let Some(day) = day else {
+        return Err(ExcType::type_error_missing_positional_with_names("date", &["day"]));
+    };
+
+    let date = from_ymd(year, month, day)?;
+    Ok(Value::Ref(heap.allocate(HeapData::Date(date))?))
+}
+
+/// Classmethod implementation for `date.today()`.
+///
+/// This issues the shared `datetime.now` OS callback. The VM resume path uses the
+/// encoded internal mode argument to convert the callback payload into a `date`.
+pub(crate) fn class_today(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<AttrCallResult> {
+    args.check_zero_args("date.today", heap)?;
+    Ok(AttrCallResult::OsCall(
+        OsFunction::DateTimeNow,
+        ArgValues::One(Value::Int(0)),
+    ))
 }
 
 fn value_to_i32(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunResult<i32> {
@@ -195,7 +252,7 @@ impl PyTrait for Date {
         _guard: &mut DepthGuard,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        Ok(self.ordinal == other.ordinal)
+        Ok(self == other)
     }
 
     fn py_cmp(
@@ -205,7 +262,7 @@ impl PyTrait for Date {
         _guard: &mut DepthGuard,
         _interns: &Interns,
     ) -> Result<Option<std::cmp::Ordering>, ResourceError> {
-        Ok(self.ordinal.partial_cmp(&other.ordinal))
+        Ok(self.partial_cmp(other))
     }
 
     fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {}
@@ -222,7 +279,7 @@ impl PyTrait for Date {
         _guard: &mut DepthGuard,
         _interns: &Interns,
     ) -> std::fmt::Result {
-        let (year, month, day) = self.to_ymd();
+        let (year, month, day) = to_ymd(*self);
         write!(f, "datetime.date({year}, {month}, {day})")
     }
 
@@ -232,7 +289,7 @@ impl PyTrait for Date {
         _guard: &mut DepthGuard,
         _interns: &Interns,
     ) -> std::borrow::Cow<'static, str> {
-        let (year, month, day) = self.to_ymd();
+        let (year, month, day) = to_ymd(*self);
         std::borrow::Cow::Owned(format!("{year:04}-{month:02}-{day:02}"))
     }
 
@@ -248,8 +305,8 @@ impl PyTrait for Date {
 
     fn py_sub(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> Result<Option<Value>, ResourceError> {
         // `date - date` returns timedelta days difference.
-        let diff_days = i64::from(self.ordinal) - i64::from(other.ordinal);
-        let Ok(delta) = TimeDelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
+        let diff_days = i64::from(to_ordinal(*self)) - i64::from(to_ordinal(*other));
+        let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
             return Ok(None);
         };
         Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
@@ -260,44 +317,92 @@ impl PyTrait for Date {
     }
 }
 
-impl Date {
-    /// `date + timedelta` helper with the correct operand type.
-    pub fn py_add(
-        self,
-        delta: &TimeDelta,
-        heap: &mut Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Result<Option<Value>, ResourceError> {
-        let new_ordinal = self.ordinal.saturating_add(delta.days);
-        match Self::from_ordinal(new_ordinal) {
-            Ok(date) => Ok(Some(Value::Ref(heap.allocate(HeapData::Date(date))?))),
-            Err(_) => Ok(None),
+/// `date + timedelta` helper with the correct operand type.
+pub(crate) fn py_add(
+    date: Date,
+    delta: &TimeDelta,
+    heap: &mut Heap<impl ResourceTracker>,
+    _interns: &Interns,
+) -> Result<Option<Value>, ResourceError> {
+    let (days, _, _) = timedelta::components(delta);
+    let new_ordinal = i64::from(to_ordinal(date)).checked_add(i64::from(days));
+    let Some(new_ordinal) = new_ordinal else {
+        return Ok(None);
+    };
+    let Ok(new_ordinal) = i32::try_from(new_ordinal) else {
+        return Ok(None);
+    };
+    match from_ordinal(new_ordinal) {
+        Ok(value) => Ok(Some(Value::Ref(heap.allocate(HeapData::Date(value))?))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `date - timedelta` helper.
+pub(crate) fn py_sub_timedelta(
+    date: Date,
+    delta: &TimeDelta,
+    heap: &mut Heap<impl ResourceTracker>,
+) -> Result<Option<Value>, ResourceError> {
+    let (days, _, _) = timedelta::components(delta);
+    let new_ordinal = i64::from(to_ordinal(date)).checked_sub(i64::from(days));
+    let Some(new_ordinal) = new_ordinal else {
+        return Ok(None);
+    };
+    let Ok(new_ordinal) = i32::try_from(new_ordinal) else {
+        return Ok(None);
+    };
+    match from_ordinal(new_ordinal) {
+        Ok(value) => Ok(Some(Value::Ref(heap.allocate(HeapData::Date(value))?))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// `date - date` helper.
+pub(crate) fn py_sub_date(
+    date: Date,
+    other: Date,
+    heap: &mut Heap<impl ResourceTracker>,
+) -> Result<Option<Value>, ResourceError> {
+    let diff_days = i64::from(to_ordinal(date)) - i64::from(to_ordinal(other));
+    let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
+        return Ok(None);
+    };
+    Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyDate {
+    ordinal: i32,
+}
+
+/// Serde adapter that preserves the previous ordinal snapshot representation.
+pub(crate) mod serde_speedate_date {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    use super::{Date, LegacyDate, from_ordinal, to_ordinal};
+
+    /// Serializes a `speedate::Date` using the previous ordinal format.
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde with-adapter serialize signature requires &Date"
+    )]
+    pub(crate) fn serialize<S>(date: &Date, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        LegacyDate {
+            ordinal: to_ordinal(*date),
         }
+        .serialize(serializer)
     }
 
-    /// `date - timedelta` helper.
-    pub fn py_sub(
-        self,
-        delta: &TimeDelta,
-        heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<Option<Value>, ResourceError> {
-        let new_ordinal = self.ordinal.saturating_sub(delta.days);
-        match Self::from_ordinal(new_ordinal) {
-            Ok(date) => Ok(Some(Value::Ref(heap.allocate(HeapData::Date(date))?))),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// `date - date` helper.
-    pub fn py_sub_date(
-        self,
-        other: Self,
-        heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<Option<Value>, ResourceError> {
-        let diff_days = i64::from(self.ordinal) - i64::from(other.ordinal);
-        let Ok(delta) = TimeDelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
-            return Ok(None);
-        };
-        Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
+    /// Deserializes a `speedate::Date` from the previous ordinal format.
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let legacy = LegacyDate::deserialize(deserializer)?;
+        from_ordinal(legacy.ordinal).map_err(|err| D::Error::custom(format!("{err:?}")))
     }
 }

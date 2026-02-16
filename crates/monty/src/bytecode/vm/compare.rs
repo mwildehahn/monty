@@ -6,7 +6,7 @@ use crate::{
     exception_private::{ExcType, RunError},
     heap::HeapData,
     resource::{DepthGuard, ResourceTracker},
-    types::{LongInt, PyTrait},
+    types::{LongInt, PyTrait, datetime},
     value::Value,
 };
 
@@ -173,7 +173,7 @@ fn datetime_awareness(value: &Value, heap: &crate::heap::Heap<impl ResourceTrack
         return None;
     };
     match heap.get(*id) {
-        HeapData::DateTime(dt) => Some(dt.is_aware()),
+        HeapData::DateTime(dt) => Some(datetime::is_aware(dt)),
         _ => None,
     }
 }

@@ -13,7 +13,7 @@ use crate::{
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
     resource::{DepthGuard, ResourceError, ResourceTracker},
-    types::{PyTrait, TimeDelta, Type},
+    types::{PyTrait, TimeDelta, Type, timedelta},
     value::Value,
 };
 
@@ -97,7 +97,7 @@ fn extract_offset_seconds(offset_arg: &Value, heap: &Heap<impl ResourceTracker>)
         )));
     };
 
-    let Some(total_seconds) = delta.exact_total_seconds() else {
+    let Some(total_seconds) = timedelta::exact_total_seconds(delta) else {
         return Err(SimpleException::new_msg(
             ExcType::ValueError,
             "offset must be a timedelta representing a whole number of seconds",
@@ -121,28 +121,29 @@ fn extract_offset_seconds(offset_arg: &Value, heap: &Heap<impl ResourceTracker>)
 }
 
 fn format_timedelta_repr(delta: &TimeDelta) -> String {
-    if delta.days == 0 && delta.seconds == 0 && delta.microseconds == 0 {
+    let (days, seconds, microseconds) = timedelta::components(delta);
+    if days == 0 && seconds == 0 && microseconds == 0 {
         return "datetime.timedelta(0)".to_owned();
     }
 
     let mut repr = String::from("datetime.timedelta(");
     let mut first = true;
-    if delta.days != 0 {
-        write!(repr, "days={}", delta.days).expect("writing to String cannot fail");
+    if days != 0 {
+        write!(repr, "days={days}").expect("writing to String cannot fail");
         first = false;
     }
-    if delta.seconds != 0 {
+    if seconds != 0 {
         if !first {
             repr.push_str(", ");
         }
-        write!(repr, "seconds={}", delta.seconds).expect("writing to String cannot fail");
+        write!(repr, "seconds={seconds}").expect("writing to String cannot fail");
         first = false;
     }
-    if delta.microseconds != 0 {
+    if microseconds != 0 {
         if !first {
             repr.push_str(", ");
         }
-        write!(repr, "microseconds={}", delta.microseconds).expect("writing to String cannot fail");
+        write!(repr, "microseconds={microseconds}").expect("writing to String cannot fail");
     }
     repr.push(')');
     repr

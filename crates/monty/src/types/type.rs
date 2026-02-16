@@ -10,8 +10,8 @@ use crate::{
     intern::Interns,
     resource::ResourceTracker,
     types::{
-        Bytes, Date, DateTime, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str,
-        TimeDelta, TimeZone, Tuple, str::StringRepr,
+        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, TimeZone, Tuple, date,
+        datetime, str::StringRepr, timedelta,
     },
     value::Value,
 };
@@ -224,9 +224,9 @@ impl Type {
             Self::Bytes => Bytes::init(heap, args, interns),
             Self::Range => Range::init(heap, args),
             Self::Slice => Slice::init(heap, args),
-            Self::Date => Date::init(heap, args, interns),
-            Self::DateTime => DateTime::init(heap, args, interns),
-            Self::TimeDelta => TimeDelta::init(heap, args, interns),
+            Self::Date => date::init(heap, args, interns),
+            Self::DateTime => datetime::init(heap, args, interns),
+            Self::TimeDelta => timedelta::init(heap, args, interns),
             Self::TimeZone => TimeZone::init(heap, args, interns),
             Self::Iterator => MontyIter::init(heap, args, interns),
             Self::Path => Path::init(heap, args, interns),

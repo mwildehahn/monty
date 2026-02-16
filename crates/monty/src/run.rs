@@ -17,7 +17,7 @@ use crate::{
     parse::parse,
     prepare::prepare,
     resource::{NoLimitTracker, ResourceTracker},
-    types::{Date, DateTime, TimeZone},
+    types::{TimeZone, date, datetime},
     value::Value,
 };
 
@@ -834,9 +834,11 @@ fn transform_os_return_value(
 
     match transform {
         PendingOsTransform::DateToday => {
-            let local_dt = DateTime::from_now_payload(timestamp_utc, local_offset_seconds, None)
+            let local_dt = datetime::from_now_payload(timestamp_utc, local_offset_seconds, None)
                 .map_err(|err| format!("{err:?}"))?;
-            let date = Date::from_local_unix_micros(local_dt.micros).map_err(|err| format!("{err:?}"))?;
+            let local_unix_micros =
+                datetime::local_micros(&local_dt).ok_or_else(|| "date value out of range".to_owned())?;
+            let date = date::from_local_unix_micros(local_unix_micros).map_err(|err| format!("{err:?}"))?;
             let id = heap.allocate(HeapData::Date(date)).map_err(|e| e.to_string())?;
             Ok(Value::Ref(id))
         }
@@ -845,7 +847,7 @@ fn transform_os_return_value(
                 .map(|offset| TimeZone::new(offset, None))
                 .transpose()
                 .map_err(|err| format!("{err:?}"))?;
-            let dt = DateTime::from_now_payload(timestamp_utc, local_offset_seconds, tzinfo)
+            let dt = datetime::from_now_payload(timestamp_utc, local_offset_seconds, tzinfo)
                 .map_err(|err| format!("{err:?}"))?;
             let id = heap.allocate(HeapData::DateTime(dt)).map_err(|e| e.to_string())?;
             Ok(Value::Ref(id))

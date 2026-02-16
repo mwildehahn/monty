@@ -32,7 +32,7 @@ use crate::{
     os::OsFunction,
     parse::CodeRange,
     resource::ResourceTracker,
-    types::{LongInt, MontyIter, PyTrait, TimeDelta, iter::advance_on_heap},
+    types::{LongInt, MontyIter, PyTrait, iter::advance_on_heap, timedelta},
     value::{BitwiseOp, EitherStr, Value},
 };
 
@@ -896,9 +896,9 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                                     Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
                                 }
                             } else if let HeapData::TimeDelta(delta) = self.heap.get(id) {
-                                let delta = *delta;
+                                let delta_total_microseconds = timedelta::total_microseconds(delta);
                                 value.drop_with_heap(self.heap);
-                                match TimeDelta::from_total_microseconds(-delta.total_microseconds()) {
+                                match timedelta::from_total_microseconds(-delta_total_microseconds) {
                                     Ok(negated) => match self.heap.allocate(HeapData::TimeDelta(negated)) {
                                         Ok(id) => self.push(Value::Ref(id)),
                                         Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
