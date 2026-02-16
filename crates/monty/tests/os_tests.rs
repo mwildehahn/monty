@@ -415,6 +415,22 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
     .unwrap();
     let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
     let bytes = progress.dump().unwrap();
+    // Consume and resume the original snapshot so ref-count-panic mode does not
+    // treat dropping internal Value::Ref entries as a leak in this test harness path.
+    let RunProgress::OsCall {
+        state: original_state,
+        ..
+    } = progress
+    else {
+        panic!("expected OsCall");
+    };
+    let _ = original_state
+        .run(
+            MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
+            &mut PrintWriter::Stdout,
+        )
+        .unwrap();
+
     let progress = RunProgress::<NoLimitTracker>::load(&bytes).unwrap();
     let RunProgress::OsCall {
         function, args, state, ..
