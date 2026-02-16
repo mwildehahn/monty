@@ -413,7 +413,7 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
         vec![],
     )
     .unwrap();
-    let progress = runner.start(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
     let bytes = progress.dump().unwrap();
     let progress = RunProgress::<NoLimitTracker>::load(&bytes).unwrap();
     let RunProgress::OsCall {
@@ -428,7 +428,7 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
     let resumed = state
         .run(
             MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
-            &mut StdPrint,
+            &mut PrintWriter::Stdout,
         )
         .unwrap();
     let output = resumed.into_complete().expect("expected completion");

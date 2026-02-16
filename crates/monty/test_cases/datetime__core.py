@@ -32,6 +32,23 @@ assert repr(datetime.timezone.utc) == 'datetime.timezone.utc', 'timezone.utc rep
 assert (
     repr(datetime.timezone(datetime.timedelta(seconds=3600))) == 'datetime.timezone(datetime.timedelta(seconds=3600))'
 ), 'timezone repr should match CPython'
+assert str(datetime.timezone(datetime.timedelta(seconds=61))) == 'UTC+00:01:01', (
+    'timezone str should include second-level offsets'
+)
+assert (
+    repr(datetime.timezone(datetime.timedelta(seconds=-1)))
+    == 'datetime.timezone(datetime.timedelta(days=-1, seconds=86399))'
+), 'timezone repr should normalize negative second offsets like CPython'
+assert (
+    repr(datetime.timezone(datetime.timedelta(hours=1), 'A'))
+    == "datetime.timezone(datetime.timedelta(seconds=3600), 'A')"
+), 'timezone repr should use Python string quoting for custom names'
+assert str(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(seconds=61)))) == (
+    '2024-01-01 00:00:00+00:01:01'
+), 'datetime str should include second-level offsets'
+assert repr(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(seconds=-1)))) == (
+    'datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=86399)))'
+), 'datetime repr should use normalized negative timezone offsets'
 
 # === arithmetic ===
 assert datetime.date(2024, 1, 10) + datetime.timedelta(days=5) == datetime.date(2024, 1, 15), (
@@ -95,6 +112,12 @@ except TypeError as e:
 assert datetime.timezone.utc == datetime.timezone(datetime.timedelta(0)), (
     'timezone.utc should equal zero offset timezone'
 )
+assert datetime.timezone(datetime.timedelta(hours=1), 'A') == datetime.timezone(datetime.timedelta(hours=1), 'B'), (
+    'timezone equality should depend on offset, not name'
+)
+assert hash(datetime.timezone(datetime.timedelta(hours=1), 'A')) == hash(
+    datetime.timezone(datetime.timedelta(hours=1), 'B')
+), 'timezone hash should depend on offset, not name'
 assert repr(datetime.timezone(datetime.timedelta(seconds=1))) == 'datetime.timezone(datetime.timedelta(seconds=1))', (
     'timezone should allow second-level fixed offsets'
 )
@@ -107,3 +130,24 @@ except ValueError as e:
         'offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), '
         'not datetime.timedelta(days=1)'
     ), 'timezone range validation message should match CPython'
+
+# === arithmetic overflow errors ===
+try:
+    datetime.date(1, 1, 1) - datetime.timedelta(days=1)
+    assert False, 'date underflow should raise OverflowError'
+except OverflowError as e:
+    assert str(e) == 'date value out of range', 'date underflow should match CPython overflow message'
+
+try:
+    datetime.datetime(9999, 12, 31, 23, 59, 59, 999999) + datetime.timedelta(microseconds=1)
+    assert False, 'datetime overflow should raise OverflowError'
+except OverflowError as e:
+    assert str(e) == 'date value out of range', 'datetime overflow should match CPython overflow message'
+
+try:
+    datetime.timedelta(days=999999999) + datetime.timedelta(days=1)
+    assert False, 'timedelta addition overflow should raise OverflowError'
+except OverflowError as e:
+    assert str(e) == 'days=1000000000; must have magnitude <= 999999999', (
+        'timedelta overflow should report the overflowing days value'
+    )

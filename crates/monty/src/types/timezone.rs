@@ -2,7 +2,7 @@
 //!
 //! Phase 1 intentionally supports only fixed offsets (no DST or IANA database).
 
-use std::{borrow::Cow, fmt::Write};
+use std::{borrow::Cow, fmt::Write, hash::Hash};
 
 use ahash::AHashSet;
 
@@ -13,7 +13,7 @@ use crate::{
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
     resource::{DepthGuard, ResourceError, ResourceTracker},
-    types::{PyTrait, TimeDelta, Type, timedelta},
+    types::{PyTrait, TimeDelta, Type, str::StringRepr, timedelta},
     value::Value,
 };
 
@@ -23,7 +23,7 @@ pub(crate) const MIN_TIMEZONE_OFFSET_SECONDS: i32 = -86_399;
 pub(crate) const MAX_TIMEZONE_OFFSET_SECONDS: i32 = 86_399;
 
 /// Python `datetime.timezone` value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TimeZone {
     /// Fixed offset in seconds from UTC.
     pub offset_seconds: i32,
@@ -72,14 +72,25 @@ impl TimeZone {
         Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))
     }
 
-    /// Formats offset as `+HH:MM` or `-HH:MM`.
+    /// Formats offset as `+HH:MM` / `-HH:MM` with optional `:SS`.
     #[must_use]
     pub fn format_utc_offset(&self) -> String {
-        let sign = if self.offset_seconds >= 0 { '+' } else { '-' };
-        let abs = self.offset_seconds.abs();
-        let hours = abs / 3600;
-        let minutes = (abs % 3600) / 60;
-        format!("{sign}{hours:02}:{minutes:02}")
+        format_offset_hms(self.offset_seconds)
+    }
+}
+
+impl PartialEq for TimeZone {
+    fn eq(&self, other: &Self) -> bool {
+        self.offset_seconds == other.offset_seconds
+    }
+}
+
+impl Eq for TimeZone {}
+
+impl Hash for TimeZone {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // CPython timezone equality/hash are offset-based.
+        self.offset_seconds.hash(state);
     }
 }
 
@@ -149,6 +160,28 @@ fn format_timedelta_repr(delta: &TimeDelta) -> String {
     repr
 }
 
+/// Formats an offset in seconds as `+HH:MM` or `+HH:MM:SS` (and negative variants).
+#[must_use]
+pub(crate) fn format_offset_hms(offset_seconds: i32) -> String {
+    let sign = if offset_seconds >= 0 { '+' } else { '-' };
+    let abs = offset_seconds.abs();
+    let hours = abs / 3600;
+    let minutes = (abs % 3600) / 60;
+    let seconds = abs % 60;
+    if seconds == 0 {
+        return format!("{sign}{hours:02}:{minutes:02}");
+    }
+    format!("{sign}{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Formats a canonical `datetime.timedelta(...)` repr for a fixed offset in seconds.
+#[must_use]
+pub(crate) fn format_offset_timedelta_repr(offset_seconds: i32) -> String {
+    let delta = timedelta::from_total_microseconds(i128::from(offset_seconds) * 1_000_000)
+        .expect("timezone offset range is always representable as timedelta");
+    format_timedelta_repr(&delta)
+}
+
 fn extract_name(name_arg: &Value, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> RunResult<Option<String>> {
     match name_arg {
         Value::None => Ok(None),
@@ -183,7 +216,7 @@ impl PyTrait for TimeZone {
         _guard: &mut DepthGuard,
         _interns: &Interns,
     ) -> Result<bool, ResourceError> {
-        Ok(self.offset_seconds == other.offset_seconds && self.name == other.name)
+        Ok(self.offset_seconds == other.offset_seconds)
     }
 
     fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {}
@@ -204,13 +237,10 @@ impl PyTrait for TimeZone {
             return f.write_str("datetime.timezone.utc");
         }
 
-        write!(
-            f,
-            "datetime.timezone(datetime.timedelta(seconds={})",
-            self.offset_seconds
-        )?;
+        let timedelta_repr = format_offset_timedelta_repr(self.offset_seconds);
+        write!(f, "datetime.timezone({timedelta_repr}")?;
         if let Some(name) = &self.name {
-            write!(f, ", {name:?}")?;
+            write!(f, ", {}", StringRepr(name))?;
         }
         f.write_char(')')?;
         Ok(())

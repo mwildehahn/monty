@@ -17,7 +17,7 @@ use crate::{
     intern::{Interns, StaticStrings, StringId},
     os::OsFunction,
     resource::{DepthGuard, ResourceError, ResourceTracker},
-    types::{AttrCallResult, PyTrait, TimeDelta, TimeZone, Type, date, timedelta},
+    types::{AttrCallResult, PyTrait, TimeDelta, TimeZone, Type, date, timedelta, timezone},
     value::Value,
 };
 
@@ -508,7 +508,8 @@ impl PyTrait for DateTime {
             if offset == 0 {
                 f.write_str(", tzinfo=datetime.timezone.utc")?;
             } else {
-                write!(f, ", tzinfo=datetime.timezone(datetime.timedelta(seconds={offset}))")?;
+                let timedelta_repr = timezone::format_offset_timedelta_repr(offset);
+                write!(f, ", tzinfo=datetime.timezone({timedelta_repr})")?;
             }
         }
         f.write_char(')')
@@ -528,11 +529,7 @@ impl PyTrait for DateTime {
             write!(s, ".{microsecond:06}").expect("writing to String cannot fail");
         }
         if let Some(offset) = offset_seconds(self) {
-            let sign = if offset >= 0 { '+' } else { '-' };
-            let abs = offset.abs();
-            let off_h = abs / 3600;
-            let off_m = (abs % 3600) / 60;
-            write!(s, "{sign}{off_h:02}:{off_m:02}").expect("writing to String cannot fail");
+            s.push_str(&timezone::format_offset_hms(offset));
         }
         Cow::Owned(s)
     }
