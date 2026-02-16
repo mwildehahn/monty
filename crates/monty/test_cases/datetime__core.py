@@ -3,11 +3,13 @@ import datetime
 
 # === now/today from deterministic OS callback ===
 today = datetime.date.today()
-assert str(today) == '2023-11-14', f'date.today() should use deterministic local date from callback, got {today!s}'
+assert str(today) == '2023-11-15', (
+    f'date.today() should use deterministic local date from callback, including date-boundary crossing, got {today!s}'
+)
 
 now_local = datetime.datetime.now()
-assert str(now_local) == '2023-11-14 22:13:20', (
-    f'datetime.now() should use deterministic local wall clock, got {now_local!s}'
+assert str(now_local) == '2023-11-15 00:13:20', (
+    f'datetime.now() should use deterministic local wall clock, including date-boundary crossing, got {now_local!s}'
 )
 
 now_utc = datetime.datetime.now(datetime.timezone.utc)

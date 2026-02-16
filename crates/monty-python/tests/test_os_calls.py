@@ -332,6 +332,52 @@ def test_date_today_resume_returns_native_date():
     assert resumed.output == snapshot(datetime.date(2023, 11, 14))
 
 
+@pytest.mark.parametrize(
+    ('return_value', 'expected'),
+    [
+        ((1,), snapshot('RuntimeError: invalid return type: datetime.now callback must return exactly two values')),
+        (1, snapshot('RuntimeError: invalid return type: datetime.now callback must return a 2-tuple')),
+    ],
+)
+def test_datetime_now_resume_rejects_invalid_payload_shape(return_value: Any, expected: Any):
+    m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
+    result = m.start()
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+    with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
+        result.resume(return_value=return_value)
+    assert str(exc_info.value) == expected
+
+
+@pytest.mark.parametrize(
+    ('return_value', 'expected'),
+    [
+        (
+            (1_700_000_000, 0),
+            snapshot('RuntimeError: invalid return type: datetime.now timestamp must be a float'),
+        ),
+        (
+            (float('inf'), 0),
+            snapshot('RuntimeError: invalid return type: datetime.now timestamp must be finite'),
+        ),
+        (
+            (1_700_000_000.0, 1.5),
+            snapshot('RuntimeError: invalid return type: datetime.now local offset must be an integer fitting i32'),
+        ),
+        (
+            (1_700_000_000.0, 2**40),
+            snapshot('RuntimeError: invalid return type: datetime.now local offset must be an integer fitting i32'),
+        ),
+    ],
+)
+def test_datetime_now_resume_rejects_invalid_payload_types(return_value: Any, expected: Any):
+    m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
+    result = m.start()
+    assert isinstance(result, pydantic_monty.MontySnapshot)
+    with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
+        result.resume(return_value=return_value)
+    assert str(exc_info.value) == expected
+
+
 def test_os_stat():
     """os can return stat_result for Path.stat()."""
 
