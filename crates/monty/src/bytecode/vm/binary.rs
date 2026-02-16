@@ -3,11 +3,11 @@
 use super::VM;
 use crate::{
     defer_drop,
-    exception_private::{ExcType, RunError},
+    exception_private::{ExcType, RunError, SimpleException},
     heap::{HeapData, HeapGuard},
     resource::ResourceTracker,
-    types::{PyTrait, datetime},
-    value::BitwiseOp,
+    types::{PyTrait, datetime, timedelta},
+    value::{BitwiseOp, Value},
 };
 
 impl<T: ResourceTracker> VM<'_, '_, T> {
@@ -29,6 +29,9 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                 Ok(())
             }
             Ok(None) => {
+                if let Some(err) = datetime_arithmetic_overflow_add(lhs, rhs, this.heap) {
+                    return Err(err);
+                }
                 let lhs_type = lhs.py_type(this.heap);
                 let rhs_type = rhs.py_type(this.heap);
                 Err(ExcType::binary_type_error("+", lhs_type, rhs_type))
@@ -59,6 +62,9 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                     && lhs_aware != rhs_aware
                 {
                     return Err(ExcType::datetime_subtract_naive_aware_error());
+                }
+                if let Some(err) = datetime_arithmetic_overflow_sub(lhs, rhs, this.heap) {
+                    return Err(err);
                 }
                 let lhs_type = lhs.py_type(this.heap);
                 let rhs_type = rhs.py_type(this.heap);
@@ -271,4 +277,98 @@ fn datetime_awareness(value: &crate::value::Value, heap: &crate::heap::Heap<impl
         HeapData::DateTime(dt) => Some(datetime::is_aware(dt)),
         _ => None,
     }
+}
+
+/// Returns an `OverflowError` when datetime/date/timedelta addition failed due to bounds.
+fn datetime_arithmetic_overflow_add(
+    lhs: &Value,
+    rhs: &Value,
+    heap: &crate::heap::Heap<impl ResourceTracker>,
+) -> Option<RunError> {
+    if (is_date(lhs, heap) && is_timedelta(rhs, heap))
+        || (is_datetime(lhs, heap) && is_timedelta(rhs, heap))
+        || (is_timedelta(lhs, heap) && is_date(rhs, heap))
+        || (is_timedelta(lhs, heap) && is_datetime(rhs, heap))
+    {
+        return Some(date_value_out_of_range_error());
+    }
+
+    if let (Some(lhs_delta), Some(rhs_delta)) = (as_timedelta(lhs, heap), as_timedelta(rhs, heap)) {
+        return timedelta_overflow_error(lhs_delta, rhs_delta, true);
+    }
+
+    None
+}
+
+/// Returns an `OverflowError` when datetime/date/timedelta subtraction failed due to bounds.
+fn datetime_arithmetic_overflow_sub(
+    lhs: &Value,
+    rhs: &Value,
+    heap: &crate::heap::Heap<impl ResourceTracker>,
+) -> Option<RunError> {
+    if (is_date(lhs, heap) && is_timedelta(rhs, heap)) || (is_datetime(lhs, heap) && is_timedelta(rhs, heap)) {
+        return Some(date_value_out_of_range_error());
+    }
+
+    if let (Some(lhs_delta), Some(rhs_delta)) = (as_timedelta(lhs, heap), as_timedelta(rhs, heap)) {
+        return timedelta_overflow_error(lhs_delta, rhs_delta, false);
+    }
+
+    None
+}
+
+fn date_value_out_of_range_error() -> RunError {
+    SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into()
+}
+
+fn timedelta_overflow_error(
+    lhs: &crate::types::TimeDelta,
+    rhs: &crate::types::TimeDelta,
+    add: bool,
+) -> Option<RunError> {
+    const DAY_MICROSECONDS: i128 = 86_400_000_000;
+
+    let lhs_micros = timedelta::total_microseconds(lhs);
+    let rhs_micros = timedelta::total_microseconds(rhs);
+    let total_micros = if add {
+        lhs_micros + rhs_micros
+    } else {
+        lhs_micros - rhs_micros
+    };
+    let days = total_micros.div_euclid(DAY_MICROSECONDS);
+    if !(i128::from(timedelta::MIN_TIMEDELTA_DAYS)..=i128::from(timedelta::MAX_TIMEDELTA_DAYS)).contains(&days) {
+        return Some(
+            SimpleException::new_msg(
+                ExcType::OverflowError,
+                format!("days={days}; must have magnitude <= 999999999"),
+            )
+            .into(),
+        );
+    }
+    None
+}
+
+fn is_date(value: &Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> bool {
+    matches!(value, Value::Ref(id) if matches!(heap.get(*id), HeapData::Date(_)))
+}
+
+fn is_datetime(value: &Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> bool {
+    matches!(value, Value::Ref(id) if matches!(heap.get(*id), HeapData::DateTime(_)))
+}
+
+fn is_timedelta(value: &Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> bool {
+    matches!(value, Value::Ref(id) if matches!(heap.get(*id), HeapData::TimeDelta(_)))
+}
+
+fn as_timedelta<'a>(
+    value: &Value,
+    heap: &'a crate::heap::Heap<impl ResourceTracker>,
+) -> Option<&'a crate::types::TimeDelta> {
+    let Value::Ref(id) = value else {
+        return None;
+    };
+    let HeapData::TimeDelta(delta) = heap.get(*id) else {
+        return None;
+    };
+    Some(delta)
 }
