@@ -11,8 +11,8 @@ use crate::{
     intern::{StaticStrings, StringId},
     resource::ResourceTracker,
     types::{
-        Bytes, Date, DateTime, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str,
-        TimeDelta, TimeZone, Tuple, bytes::bytes_fromhex, dict::dict_fromkeys, str::StringRepr,
+        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, TimeZone, Tuple,
+        bytes::bytes_fromhex, date, datetime, dict::dict_fromkeys, str::StringRepr, timedelta,
     },
     value::Value,
 };
@@ -222,9 +222,9 @@ impl Type {
             Self::Bytes => Bytes::init(vm, args),
             Self::Range => Range::init(vm, args),
             Self::Slice => Slice::init(vm, args),
-            Self::Date => Date::init(vm.heap, args, vm.interns),
-            Self::DateTime => DateTime::init(vm.heap, args, vm.interns),
-            Self::TimeDelta => TimeDelta::init(vm.heap, args, vm.interns),
+            Self::Date => date::init(vm.heap, args, vm.interns),
+            Self::DateTime => datetime::init(vm.heap, args, vm.interns),
+            Self::TimeDelta => timedelta::init(vm.heap, args, vm.interns),
             Self::TimeZone => TimeZone::init(vm.heap, args, vm.interns),
             Self::Iterator => MontyIter::init(vm, args),
             Self::Path => Path::init(vm, args),

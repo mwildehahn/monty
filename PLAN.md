@@ -136,8 +136,8 @@ All four types are immutable and contain no heap references, so `is_gc_tracked()
 Representation must make arithmetic/comparison cheap and deterministic.
 
 ## Rust Library Choice
-1. Use `chrono` in phase 1 for calendar/offset math and normalization.
-2. Keep parsing/formatting layer isolated so `speedate` can be added in phase 2 for CPython-style parsing behavior.
+1. Use `speedate` for date/datetime/timedelta runtime storage and timestamp conversion.
+2. Keep CPython-specific error semantics and formatting in Monty wrappers around `speedate` types.
 
 ## Core Implementation Tasks
 

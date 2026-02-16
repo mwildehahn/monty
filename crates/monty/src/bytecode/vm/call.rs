@@ -18,7 +18,7 @@ use crate::{
     os::OsFunction,
     resource::ResourceTracker,
     types::{
-        AttrCallResult, Date, DateTime, Dict, PyTrait, Type,
+        AttrCallResult, Dict, PyTrait, Type,
         bytes::{bytes_fromhex, call_bytes_method},
         dict::dict_fromkeys,
         str::call_str_method,
@@ -819,8 +819,8 @@ fn call_type_method(
         (Type::Bytes, m) if m == StaticStrings::Fromhex => {
             return bytes_fromhex(args, vm.heap, vm.interns).map(AttrCallResult::Value);
         }
-        (Type::Date, m) if m == StaticStrings::Today => return Date::class_today(vm.heap, args),
-        (Type::DateTime, m) if m == StaticStrings::Now => return DateTime::class_now(vm.heap, args, vm.interns),
+        (Type::Date, m) if m == StaticStrings::Today => return crate::types::date::class_today(vm.heap, args),
+        (Type::DateTime, m) if m == StaticStrings::Now => return crate::types::datetime::class_now(vm.heap, args, vm.interns),
         _ => {}
     }
     // Other types or unknown methods - report actual type name, not 'type'

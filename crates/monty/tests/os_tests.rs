@@ -410,25 +410,21 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
         "import datetime\ndatetime.date.today()".to_owned(),
         "test.py",
         vec![],
-        vec![],
     )
     .unwrap();
-    let progress = runner.start(vec![], NoLimitTracker, &mut StdPrint).unwrap();
+    let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
     let bytes = progress.dump().unwrap();
     let progress = RunProgress::<NoLimitTracker>::load(&bytes).unwrap();
-    let RunProgress::OsCall {
-        function, args, state, ..
-    } = progress
-    else {
+    let RunProgress::OsCall(call) = progress else {
         panic!("expected OsCall");
     };
-    assert_eq!(function, OsFunction::DateTimeNow);
-    assert!(args.is_empty());
+    assert_eq!(call.function, OsFunction::DateTimeNow);
+    assert!(call.args.is_empty());
 
-    let resumed = state
-        .run(
+    let resumed = call
+        .resume(
             MontyObject::Tuple(vec![MontyObject::Float(1_700_000_000.0), MontyObject::Int(0)]),
-            &mut StdPrint,
+            &mut PrintWriter::Stdout,
         )
         .unwrap();
     let output = resumed.into_complete().expect("expected completion");

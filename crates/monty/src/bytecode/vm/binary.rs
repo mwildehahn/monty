@@ -6,7 +6,7 @@ use crate::{
     exception_private::{ExcType, RunError},
     heap::{HeapData, HeapGuard},
     resource::ResourceTracker,
-    types::PyTrait,
+    types::{PyTrait, datetime},
     value::BitwiseOp,
 };
 
@@ -268,7 +268,7 @@ fn datetime_awareness(value: &crate::value::Value, heap: &crate::heap::Heap<impl
         return None;
     };
     match heap.get(*id) {
-        HeapData::DateTime(dt) => Some(dt.is_aware()),
+        HeapData::DateTime(dt) => Some(datetime::is_aware(dt)),
         _ => None,
     }
 }

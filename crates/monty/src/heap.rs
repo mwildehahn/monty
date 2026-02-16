@@ -27,7 +27,7 @@ use crate::{
     types::{
         AttrCallResult, Bytes, Dataclass, Date, DateTime, Dict, FrozenSet, List, LongInt, Module, MontyIter,
         NamedTuple, Path, PyTrait, Range, ReMatch, RePattern, Set, Slice, Str, TimeDelta, TimeZone, Tuple, Type,
-        allocate_tuple,
+        allocate_tuple, date, datetime, timedelta,
     },
     value::{EitherStr, Value},
 };
@@ -76,12 +76,12 @@ pub(crate) enum HeapData {
     /// Stored on the heap to keep `Value` enum small (16 bytes). Range objects
     /// are immutable and hashable.
     Range(Range),
-    /// A `datetime.date` value stored as a proleptic Gregorian ordinal day.
-    Date(Date),
-    /// A `datetime.datetime` value that is either naive or fixed-offset aware.
-    DateTime(DateTime),
-    /// A `datetime.timedelta` duration value.
-    TimeDelta(TimeDelta),
+    /// A `datetime.date` value stored with `speedate::Date`.
+    Date(#[serde(with = "crate::types::date::serde_speedate_date")] Date),
+    /// A `datetime.datetime` value stored with `speedate::DateTime`.
+    DateTime(#[serde(with = "crate::types::datetime::serde_speedate_datetime")] DateTime),
+    /// A `datetime.timedelta` duration value stored with `speedate::Duration`.
+    TimeDelta(#[serde(with = "crate::types::timedelta::serde_speedate_duration")] TimeDelta),
     /// A fixed-offset `datetime.timezone` value.
     TimeZone(TimeZone),
     /// A slice object (e.g., `slice(1, 10, 2)` or from `x[1:10:2]`).
@@ -339,19 +339,23 @@ impl HeapData {
             Self::Date(date) => {
                 let mut hasher = DefaultHasher::new();
                 discriminant(self).hash(&mut hasher);
-                date.hash(&mut hasher);
+                date::to_ordinal(*date).hash(&mut hasher);
                 Some(hasher.finish())
             }
             Self::DateTime(dt) => {
                 let mut hasher = DefaultHasher::new();
                 discriminant(self).hash(&mut hasher);
-                dt.hash(&mut hasher);
+                if datetime::is_aware(dt) {
+                    datetime::utc_micros(dt).hash(&mut hasher);
+                } else {
+                    datetime::local_micros(dt).hash(&mut hasher);
+                }
                 Some(hasher.finish())
             }
             Self::TimeDelta(delta) => {
                 let mut hasher = DefaultHasher::new();
                 discriminant(self).hash(&mut hasher);
-                delta.hash(&mut hasher);
+                timedelta::total_microseconds(delta).hash(&mut hasher);
                 Some(hasher.finish())
             }
             Self::TimeZone(tz) => {
@@ -727,11 +731,11 @@ impl PyTrait for HeapData {
                 let bi = a.inner() + b.inner();
                 Ok(LongInt::new(bi).into_value(heap).map(Some)?)
             }
-            (Self::Date(a), Self::TimeDelta(b)) => (*a).py_add(b, heap, interns),
-            (Self::DateTime(a), Self::TimeDelta(b)) => a.py_add(b, heap, interns),
+            (Self::Date(a), Self::TimeDelta(b)) => crate::types::date::py_add(*a, b, heap, interns),
+            (Self::DateTime(a), Self::TimeDelta(b)) => crate::types::datetime::py_add(a, b, heap, interns),
             (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_add(b, heap, interns),
-            (Self::TimeDelta(a), Self::Date(b)) => (*b).py_add(a, heap, interns),
-            (Self::TimeDelta(a), Self::DateTime(b)) => b.py_add(a, heap, interns),
+            (Self::TimeDelta(a), Self::Date(b)) => crate::types::date::py_add(*b, a, heap, interns),
+            (Self::TimeDelta(a), Self::DateTime(b)) => crate::types::datetime::py_add(b, a, heap, interns),
             // Cells and Dataclasses don't support arithmetic operations
             _ => Ok(None),
         }
@@ -754,10 +758,10 @@ impl PyTrait for HeapData {
                 let bi = a.inner() - b.inner();
                 Ok(LongInt::new(bi).into_value(heap).map(Some)?)
             }
-            (Self::Date(a), Self::Date(b)) => (*a).py_sub_date(*b, heap),
-            (Self::Date(a), Self::TimeDelta(b)) => (*a).py_sub(b, heap),
+            (Self::Date(a), Self::Date(b)) => crate::types::date::py_sub_date(*a, *b, heap),
+            (Self::Date(a), Self::TimeDelta(b)) => crate::types::date::py_sub_timedelta(*a, b, heap),
             (Self::DateTime(a), Self::DateTime(b)) => a.py_sub(b, heap),
-            (Self::DateTime(a), Self::TimeDelta(b)) => a.py_sub_timedelta(b, heap),
+            (Self::DateTime(a), Self::TimeDelta(b)) => crate::types::datetime::py_sub_timedelta(a, b, heap),
             (Self::TimeDelta(a), Self::TimeDelta(b)) => a.py_sub(b, heap),
             // Cells don't support arithmetic operations
             _ => Ok(None),
