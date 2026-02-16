@@ -1,3 +1,5 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use monty::MontyObject;
 
 /// Tests for `MontyObject::is_truthy()` - Python's truth value testing rules.
@@ -118,4 +120,214 @@ fn type_name() {
     assert_eq!(MontyObject::List(vec![]).type_name(), "list");
     assert_eq!(MontyObject::Tuple(vec![]).type_name(), "tuple");
     assert_eq!(MontyObject::dict(vec![]).type_name(), "dict");
+}
+
+#[test]
+fn is_truthy_datetime_scalars() {
+    assert!(
+        MontyObject::Date {
+            year: 2024,
+            month: 1,
+            day: 15
+        }
+        .is_truthy()
+    );
+    assert!(
+        MontyObject::DateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 0,
+            microsecond: 0,
+            offset_seconds: None,
+        }
+        .is_truthy()
+    );
+    assert!(
+        MontyObject::TimeZone {
+            offset_seconds: 0,
+            name: None
+        }
+        .is_truthy()
+    );
+    assert!(
+        !MontyObject::TimeDelta {
+            days: 0,
+            seconds: 0,
+            microseconds: 0,
+        }
+        .is_truthy()
+    );
+    assert!(
+        MontyObject::TimeDelta {
+            days: 0,
+            seconds: 1,
+            microseconds: 0,
+        }
+        .is_truthy()
+    );
+}
+
+#[test]
+fn type_name_datetime_scalars() {
+    assert_eq!(
+        MontyObject::Date {
+            year: 2024,
+            month: 1,
+            day: 15
+        }
+        .type_name(),
+        "date"
+    );
+    assert_eq!(
+        MontyObject::DateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 0,
+            microsecond: 0,
+            offset_seconds: None,
+        }
+        .type_name(),
+        "datetime"
+    );
+    assert_eq!(
+        MontyObject::TimeDelta {
+            days: 1,
+            seconds: 2,
+            microseconds: 3,
+        }
+        .type_name(),
+        "timedelta"
+    );
+    assert_eq!(
+        MontyObject::TimeZone {
+            offset_seconds: 3_600,
+            name: Some("X".to_string()),
+        }
+        .type_name(),
+        "timezone"
+    );
+}
+
+#[test]
+fn py_repr_datetime_scalars() {
+    assert_eq!(
+        MontyObject::Date {
+            year: 2024,
+            month: 1,
+            day: 15,
+        }
+        .py_repr(),
+        "datetime.date(2024, 1, 15)"
+    );
+    assert_eq!(
+        MontyObject::DateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 0,
+            microsecond: 0,
+            offset_seconds: None,
+        }
+        .py_repr(),
+        "datetime.datetime(2024, 1, 15, 10, 30)"
+    );
+    assert_eq!(
+        MontyObject::DateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 5,
+            microsecond: 7,
+            offset_seconds: Some(0),
+        }
+        .py_repr(),
+        "datetime.datetime(2024, 1, 15, 10, 30, 5, 7, tzinfo=datetime.timezone.utc)"
+    );
+    assert_eq!(
+        MontyObject::TimeDelta {
+            days: 0,
+            seconds: 0,
+            microseconds: 0,
+        }
+        .py_repr(),
+        "datetime.timedelta(0)"
+    );
+    assert_eq!(
+        MontyObject::TimeDelta {
+            days: 1,
+            seconds: 2,
+            microseconds: 3,
+        }
+        .py_repr(),
+        "datetime.timedelta(days=1, seconds=2, microseconds=3)"
+    );
+    assert_eq!(
+        MontyObject::TimeZone {
+            offset_seconds: 0,
+            name: None,
+        }
+        .py_repr(),
+        "datetime.timezone.utc"
+    );
+    assert_eq!(
+        MontyObject::TimeZone {
+            offset_seconds: 61,
+            name: Some("N".to_string()),
+        }
+        .py_repr(),
+        "datetime.timezone(datetime.timedelta(seconds=61), 'N')"
+    );
+}
+
+#[test]
+fn hash_datetime_scalars() {
+    fn hash_value(value: &MontyObject) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let date_a = MontyObject::Date {
+        year: 2024,
+        month: 1,
+        day: 15,
+    };
+    let date_b = MontyObject::Date {
+        year: 2024,
+        month: 1,
+        day: 15,
+    };
+    assert_eq!(hash_value(&date_a), hash_value(&date_b));
+
+    let tz_a = MontyObject::TimeZone {
+        offset_seconds: 3_600,
+        name: Some("A".to_string()),
+    };
+    let tz_b = MontyObject::TimeZone {
+        offset_seconds: 3_600,
+        name: Some("B".to_string()),
+    };
+    assert_ne!(hash_value(&tz_a), hash_value(&tz_b));
+
+    let delta_a = MontyObject::TimeDelta {
+        days: 1,
+        seconds: 2,
+        microseconds: 3,
+    };
+    let delta_b = MontyObject::TimeDelta {
+        days: 1,
+        seconds: 2,
+        microseconds: 3,
+    };
+    assert_eq!(hash_value(&delta_a), hash_value(&delta_b));
 }
