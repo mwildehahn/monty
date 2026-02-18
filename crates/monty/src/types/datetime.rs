@@ -46,15 +46,6 @@ pub(crate) fn from_components(
     microsecond: i32,
     tzinfo: Option<TimeZone>,
 ) -> RunResult<DateTime> {
-    if !(1..=9999).contains(&year) {
-        return Err(SimpleException::new_msg(ExcType::ValueError, format!("year {year} is out of range")).into());
-    }
-    if !(1..=12).contains(&month) {
-        return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
-    }
-    if !(1..=31).contains(&day) {
-        return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
-    }
     if !(0..=23).contains(&hour) {
         return Err(SimpleException::new_msg(ExcType::ValueError, "hour must be in 0..23").into());
     }
@@ -68,6 +59,8 @@ pub(crate) fn from_components(
         return Err(SimpleException::new_msg(ExcType::ValueError, "microsecond must be in 0..999999").into());
     }
 
+    // Delegate all date-component validation to `date::from_ymd` so date and datetime
+    // constructors stay in lockstep on CPython-compatible error behavior.
     let date_value = date::from_ymd(year, month, day)?;
     let time = NaiveTime::from_hms_micro_opt(
         u32::try_from(hour).expect("hour validated to 0..=23"),
