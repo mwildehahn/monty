@@ -33,13 +33,9 @@ pub enum Type {
     Float,
     Range,
     Slice,
-    #[strum(disabled)]
     Date,
-    #[strum(disabled)]
     DateTime,
-    #[strum(disabled)]
     TimeDelta,
-    #[strum(disabled)]
     TimeZone,
     Str,
     Bytes,

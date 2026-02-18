@@ -1,13 +1,13 @@
 //! Python `datetime.date` implementation.
 //!
-//! Monty stores dates with `speedate::Date` and keeps CPython-compatible
+//! Monty stores dates with `chrono::NaiveDate` and keeps CPython-compatible
 //! constructor validation and arithmetic behavior.
 
 use std::fmt::Write;
 
 use ahash::AHashSet;
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use speedate::{DateConfigBuilder, TimestampUnit};
 
 use crate::{
     args::ArgValues,
@@ -21,8 +21,9 @@ use crate::{
     value::Value,
 };
 
-/// `datetime.date` storage backed directly by `speedate`.
-pub(crate) type Date = speedate::Date;
+/// `datetime.date` storage backed by `chrono::NaiveDate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Date(pub(crate) NaiveDate);
 
 /// Creates a date from validated civil components.
 pub(crate) fn from_ymd(year: i32, month: i32, day: i32) -> RunResult<Date> {
@@ -32,114 +33,52 @@ pub(crate) fn from_ymd(year: i32, month: i32, day: i32) -> RunResult<Date> {
     if !(1..=12).contains(&month) {
         return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
     }
-    let Ok(day_u8) = u8::try_from(day) else {
+    let Ok(month) = u32::try_from(month) else {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
+    };
+    let Ok(day) = u32::try_from(day) else {
         return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
     };
-    let month_u8 = u8::try_from(month).expect("month already validated");
-    if day_u8 == 0 || day_u8 > days_in_month(year, month_u8) {
+
+    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
         return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
-    }
-    Ok(Date {
-        year: u16::try_from(year).expect("year validated to 1..=9999"),
-        month: month_u8,
-        day: day_u8,
-    })
+    };
+    Ok(Date(date))
 }
 
 /// Creates a date from a proleptic Gregorian ordinal value.
 pub(crate) fn from_ordinal(ordinal: i32) -> RunResult<Date> {
-    let days_since_epoch = i64::from(ordinal) - 719_163;
-    let (year, month, day) = civil_from_days_since_unix_epoch(days_since_epoch);
-    if !(1..=9999).contains(&year) {
+    let Some(date) = NaiveDate::from_num_days_from_ce_opt(ordinal) else {
+        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
+    };
+    if !(1..=9999).contains(&date.year()) {
         return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
     }
-    Ok(Date {
-        year: u16::try_from(year).expect("year range validated to 1..=9999"),
-        month,
-        day,
-    })
+    Ok(Date(date))
 }
 
 /// Returns the proleptic Gregorian ordinal (`1 == 0001-01-01`) for a date.
 #[must_use]
 pub(crate) fn to_ordinal(date: Date) -> i32 {
-    let days_since_epoch = days_since_unix_epoch(i32::from(date.year), date.month, date.day);
-    i32::try_from(days_since_epoch + 719_163).expect("supported year range ordinal always fits i32")
+    date.0.num_days_from_ce()
 }
 
 /// Returns civil components `(year, month, day)`.
 #[must_use]
 pub(crate) fn to_ymd(date: Date) -> (i32, u32, u32) {
-    (i32::from(date.year), u32::from(date.month), u32::from(date.day))
+    (date.0.year(), date.0.month(), date.0.day())
 }
 
 /// Creates a date from local wall-clock microseconds since Unix epoch.
 pub(crate) fn from_local_unix_micros(local_unix_micros: i64) -> RunResult<Date> {
-    let seconds = local_unix_micros.div_euclid(1_000_000);
-    let config = DateConfigBuilder::new().timestamp_unit(TimestampUnit::Second).build();
-    let date = Date::from_timestamp(seconds, false, &config)
-        .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "date value out of range"))?;
-    if date.year == 0 {
+    let Some(datetime) = DateTime::<Utc>::from_timestamp_micros(local_unix_micros) else {
+        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
+    };
+    let date = datetime.date_naive();
+    if !(1..=9999).contains(&date.year()) {
         return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
     }
-    Ok(date)
-}
-
-#[must_use]
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-#[must_use]
-fn days_in_month(year: i32, month: u8) -> u8 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => unreachable!("month validated to 1..=12"),
-    }
-}
-
-/// Days since Unix epoch (`1970-01-01`) for a civil date.
-///
-/// Algorithm derived from Howard Hinnant's civil date formulas.
-#[must_use]
-fn days_since_unix_epoch(year: i32, month: u8, day: u8) -> i64 {
-    let mut year = i64::from(year);
-    let month = i64::from(month);
-    let day = i64::from(day);
-
-    year -= i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-/// Civil date `(year, month, day)` from days since Unix epoch (`1970-01-01`).
-///
-/// Algorithm derived from Howard Hinnant's civil date formulas.
-#[must_use]
-fn civil_from_days_since_unix_epoch(days_since_epoch: i64) -> (i32, u8, u8) {
-    let z = days_since_epoch + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096).div_euclid(365);
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2).div_euclid(153);
-    let day = day_of_year - (153 * month_prime + 2).div_euclid(5) + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-
-    (
-        i32::try_from(year).expect("calculated year fits i32"),
-        u8::try_from(month).expect("calculated month fits u8"),
-        u8::try_from(day).expect("calculated day fits u8"),
-    )
+    Ok(Date(date))
 }
 
 /// Constructor for `date(year, month, day)`.
@@ -377,12 +316,12 @@ struct LegacyDate {
 }
 
 /// Serde adapter that preserves the previous ordinal snapshot representation.
-pub(crate) mod serde_speedate_date {
+pub(crate) mod serde_chrono_date {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
     use super::{Date, LegacyDate, from_ordinal, to_ordinal};
 
-    /// Serializes a `speedate::Date` using the previous ordinal format.
+    /// Serializes a chrono-backed `Date` using the previous ordinal format.
     #[expect(
         clippy::trivially_copy_pass_by_ref,
         reason = "serde with-adapter serialize signature requires &Date"
@@ -397,7 +336,7 @@ pub(crate) mod serde_speedate_date {
         .serialize(serializer)
     }
 
-    /// Deserializes a `speedate::Date` from the previous ordinal format.
+    /// Deserializes a chrono-backed `Date` from the previous ordinal format.
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
     where
         D: Deserializer<'de>,

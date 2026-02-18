@@ -86,12 +86,12 @@ pub(crate) enum HeapData {
     /// Stored on the heap to keep `Value` enum small (16 bytes). Range objects
     /// are immutable and hashable.
     Range(Range),
-    /// A `datetime.date` value stored with `speedate::Date`.
-    Date(#[serde(with = "crate::types::date::serde_speedate_date")] Date),
-    /// A `datetime.datetime` value stored with `speedate::DateTime`.
-    DateTime(#[serde(with = "crate::types::datetime::serde_speedate_datetime")] DateTime),
-    /// A `datetime.timedelta` duration value stored with `speedate::Duration`.
-    TimeDelta(#[serde(with = "crate::types::timedelta::serde_speedate_duration")] TimeDelta),
+    /// A `datetime.date` value stored with `chrono::NaiveDate`.
+    Date(#[serde(with = "crate::types::date::serde_chrono_date")] Date),
+    /// A `datetime.datetime` value stored with chrono primitives.
+    DateTime(#[serde(with = "crate::types::datetime::serde_chrono_datetime")] DateTime),
+    /// A `datetime.timedelta` duration value stored with `chrono::TimeDelta`.
+    TimeDelta(#[serde(with = "crate::types::timedelta::serde_chrono_timedelta")] TimeDelta),
     /// A fixed-offset `datetime.timezone` value.
     TimeZone(TimeZone),
     /// A slice object (e.g., `slice(1, 10, 2)` or from `x[1:10:2]`).

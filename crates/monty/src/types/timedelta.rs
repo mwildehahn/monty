@@ -1,12 +1,13 @@
 //! Python `datetime.timedelta` implementation.
 //!
-//! Monty stores timedeltas using `speedate::Duration`, while preserving CPython's
+//! Monty stores timedeltas using `chrono::TimeDelta`, while preserving CPython's
 //! normalized `(days, seconds, microseconds)` semantics for constructors, arithmetic,
 //! and formatting.
 
 use std::fmt::Write;
 
 use ahash::AHashSet;
+use chrono::TimeDelta as ChronoTimeDelta;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -28,8 +29,9 @@ pub(crate) const MAX_TIMEDELTA_DAYS: i32 = 999_999_999;
 const DAY_SECONDS: i128 = 86_400;
 const DAY_MICROSECONDS: i128 = DAY_SECONDS * 1_000_000;
 
-/// `datetime.timedelta` storage backed directly by `speedate`.
-pub(crate) type TimeDelta = speedate::Duration;
+/// `datetime.timedelta` storage backed by `chrono::TimeDelta`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct TimeDelta(pub(crate) ChronoTimeDelta);
 
 /// Creates a normalized timedelta value from CPython components.
 pub(crate) fn new(days: i32, seconds: i32, microseconds: i32) -> RunResult<TimeDelta> {
@@ -57,7 +59,7 @@ pub(crate) fn components(delta: &TimeDelta) -> (i32, i32, i32) {
     let seconds = rem / 1_000_000;
     let micros = rem % 1_000_000;
     (
-        i32::try_from(days).expect("speedate day range fits CPython i32 day bounds"),
+        i32::try_from(days).expect("chrono day range fits CPython i32 day bounds"),
         i32::try_from(seconds).expect("seconds are bounded by one day"),
         i32::try_from(micros).expect("microseconds are bounded by one second"),
     )
@@ -66,13 +68,11 @@ pub(crate) fn components(delta: &TimeDelta) -> (i32, i32, i32) {
 /// Returns the duration as total microseconds.
 #[must_use]
 pub(crate) fn total_microseconds(delta: &TimeDelta) -> i128 {
-    let unsigned_total =
-        i128::from(delta.day) * DAY_MICROSECONDS + i128::from(delta.second) * 1_000_000 + i128::from(delta.microsecond);
-    if delta.positive {
-        unsigned_total
-    } else {
-        -unsigned_total
-    }
+    // `subsec_nanos` can be negative for negative durations; summing both parts
+    // yields an exact signed duration as long as we keep microsecond precision.
+    let seconds = i128::from(delta.0.num_seconds());
+    let microseconds = i128::from(delta.0.subsec_nanos() / 1_000);
+    seconds * 1_000_000 + microseconds
 }
 
 /// Returns the duration as total whole seconds plus fractional microseconds.
@@ -92,6 +92,17 @@ pub(crate) fn exact_total_seconds(delta: &TimeDelta) -> Option<i128> {
     }
 }
 
+/// Exposes the underlying chrono duration for datetime/date arithmetic.
+#[must_use]
+pub(crate) fn chrono_delta(delta: &TimeDelta) -> ChronoTimeDelta {
+    delta.0
+}
+
+/// Converts a chrono duration to Monty's bounded timedelta.
+pub(crate) fn from_chrono(delta: ChronoTimeDelta) -> RunResult<TimeDelta> {
+    from_total_microseconds(i128::from(delta.num_seconds()) * 1_000_000 + i128::from(delta.subsec_nanos() / 1_000))
+}
+
 /// Builds a normalized timedelta from an arbitrary microsecond count.
 pub(crate) fn from_total_microseconds(total_microseconds: i128) -> RunResult<TimeDelta> {
     let days = total_microseconds.div_euclid(DAY_MICROSECONDS);
@@ -103,27 +114,17 @@ pub(crate) fn from_total_microseconds(total_microseconds: i128) -> RunResult<Tim
         .into());
     }
 
-    let positive = total_microseconds >= 0;
-    let abs_total_microseconds = if positive {
-        total_microseconds
-    } else {
-        total_microseconds
-            .checked_neg()
-            .ok_or_else(|| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range"))?
-    };
+    let seconds = total_microseconds.div_euclid(1_000_000);
+    let micros = total_microseconds.rem_euclid(1_000_000);
 
-    let day = abs_total_microseconds / DAY_MICROSECONDS;
-    let rem = abs_total_microseconds % DAY_MICROSECONDS;
-    let second = rem / 1_000_000;
-    let microsecond = rem % 1_000_000;
+    let seconds = i64::try_from(seconds)
+        .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range"))?;
+    let nanos =
+        u32::try_from(micros * 1_000).expect("microsecond remainder is in 0..1_000_000 and fits u32 nanoseconds");
 
-    TimeDelta::new(
-        positive,
-        u32::try_from(day).expect("day range validated against CPython bounds"),
-        u32::try_from(second).expect("seconds are bounded by one day"),
-        u32::try_from(microsecond).expect("microseconds are bounded by one second"),
-    )
-    .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range").into())
+    let delta = ChronoTimeDelta::new(seconds, nanos)
+        .ok_or_else(|| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range"))?;
+    Ok(TimeDelta(delta))
 }
 
 /// Creates a `timedelta` from constructor arguments.
@@ -330,7 +331,9 @@ impl PyTrait for TimeDelta {
         heap: &mut Heap<impl ResourceTracker>,
         _interns: &Interns,
     ) -> Result<Option<Value>, ResourceError> {
-        let total = total_microseconds(self) + total_microseconds(other);
+        let Some(total) = total_microseconds(self).checked_add(total_microseconds(other)) else {
+            return Ok(None);
+        };
         let Ok(result) = from_total_microseconds(total) else {
             return Ok(None);
         };
@@ -338,7 +341,9 @@ impl PyTrait for TimeDelta {
     }
 
     fn py_sub(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> Result<Option<Value>, ResourceError> {
-        let total = total_microseconds(self) - total_microseconds(other);
+        let Some(total) = total_microseconds(self).checked_sub(total_microseconds(other)) else {
+            return Ok(None);
+        };
         let Ok(result) = from_total_microseconds(total) else {
             return Ok(None);
         };
@@ -372,12 +377,12 @@ struct LegacyTimeDelta {
 }
 
 /// Serde adapter that preserves the previous `(days, seconds, microseconds)` snapshot format.
-pub(crate) mod serde_speedate_duration {
+pub(crate) mod serde_chrono_timedelta {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
     use super::{LegacyTimeDelta, TimeDelta, components, new};
 
-    /// Serializes `speedate::Duration` using CPython timedelta fields.
+    /// Serializes `chrono::TimeDelta` using CPython timedelta fields.
     pub(crate) fn serialize<S>(delta: &TimeDelta, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -391,7 +396,7 @@ pub(crate) mod serde_speedate_duration {
         .serialize(serializer)
     }
 
-    /// Deserializes `speedate::Duration` from CPython timedelta fields.
+    /// Deserializes `chrono::TimeDelta` from CPython timedelta fields.
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimeDelta, D::Error>
     where
         D: Deserializer<'de>,

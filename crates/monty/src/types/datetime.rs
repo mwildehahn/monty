@@ -1,13 +1,17 @@
 //! Python `datetime.datetime` implementation.
 //!
-//! Monty stores datetimes with `speedate::DateTime` and layers CPython-compatible
+//! Monty stores datetimes with chrono primitives and layers CPython-compatible
 //! constructor rules, aware/naive comparison semantics, and arithmetic on top.
 
 use std::{borrow::Cow, fmt::Write};
 
 use ahash::AHashSet;
+use chrono::{
+    DateTime as ChronoDateTime, Datelike, FixedOffset, NaiveDateTime, NaiveTime, TimeDelta as ChronoTimeDelta,
+    Timelike, Utc,
+};
+use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use speedate::{DateTimeConfigBuilder, Time as SpeedTime, TimestampUnit};
 
 use crate::{
     args::ArgValues,
@@ -24,8 +28,12 @@ use crate::{
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const DATE_OUT_OF_RANGE: &str = "date value out of range";
 
-/// `datetime.datetime` storage backed directly by `speedate`.
-pub(crate) type DateTime = speedate::DateTime;
+/// `datetime.datetime` storage backed by `chrono::NaiveDateTime` plus optional fixed offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DateTime {
+    naive: NaiveDateTime,
+    offset_seconds: Option<i32>,
+}
 
 /// Creates a datetime from civil components and optional fixed offset.
 #[expect(clippy::too_many_arguments)]
@@ -59,23 +67,31 @@ pub(crate) fn from_components(
     }
 
     let date_value = date::from_ymd(year, month, day)?;
+    let time = NaiveTime::from_hms_micro_opt(
+        u32::try_from(hour).expect("hour validated to 0..=23"),
+        u32::try_from(minute).expect("minute validated to 0..=59"),
+        u32::try_from(second).expect("second validated to 0..=59"),
+        u32::try_from(microsecond).expect("microsecond validated to 0..=999_999"),
+    )
+    .expect("validated time components must produce a NaiveTime");
+
     let offset_seconds = tzinfo.map(|tz| tz.offset_seconds);
+    if let Some(offset_seconds) = offset_seconds
+        && FixedOffset::east_opt(offset_seconds).is_none()
+    {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "timezone offset out of range").into());
+    }
+
     let datetime = DateTime {
-        date: date_value,
-        time: SpeedTime {
-            hour: u8::try_from(hour).expect("hour validated to 0..=23"),
-            minute: u8::try_from(minute).expect("minute validated to 0..=59"),
-            second: u8::try_from(second).expect("second validated to 0..=59"),
-            microsecond: u32::try_from(microsecond).expect("microsecond validated to 0..=999_999"),
-            tz_offset: offset_seconds,
-        },
+        naive: date_value.0.and_time(time),
+        offset_seconds,
     };
 
     if let Some(offset_seconds) = offset_seconds {
-        let Some(utc_micros) = utc_micros(&datetime) else {
+        let Some(utc) = to_utc_naive(&datetime) else {
             return Err(SimpleException::new_msg(ExcType::OverflowError, DATE_OUT_OF_RANGE).into());
         };
-        if from_utc_micros_with_offset(utc_micros, offset_seconds).is_none() {
+        if from_utc_naive_with_offset(utc, offset_seconds).is_none() {
             return Err(SimpleException::new_msg(ExcType::OverflowError, DATE_OUT_OF_RANGE).into());
         }
     }
@@ -117,29 +133,31 @@ pub(crate) fn from_now_payload(
 /// Returns true when this is an aware datetime.
 #[must_use]
 pub(crate) fn is_aware(datetime: &DateTime) -> bool {
-    datetime.time.tz_offset.is_some()
+    datetime.offset_seconds.is_some()
 }
 
 /// Returns the fixed offset seconds for aware datetimes.
 #[must_use]
 pub(crate) fn offset_seconds(datetime: &DateTime) -> Option<i32> {
-    datetime.time.tz_offset
+    datetime.offset_seconds
 }
 
 /// Returns civil components in compact integer widths for object conversion.
 #[must_use]
 pub(crate) fn to_components(datetime: &DateTime) -> Option<(i32, u8, u8, u8, u8, u8, u32)> {
-    if datetime.date.year == 0 {
+    let year = datetime.naive.date().year();
+    if !year_in_python_range(year) {
         return None;
     }
+
     Some((
-        i32::from(datetime.date.year),
-        datetime.date.month,
-        datetime.date.day,
-        datetime.time.hour,
-        datetime.time.minute,
-        datetime.time.second,
-        datetime.time.microsecond,
+        year,
+        u8::try_from(datetime.naive.date().month()).expect("month is always in 1..=12"),
+        u8::try_from(datetime.naive.date().day()).expect("day is always in 1..=31"),
+        u8::try_from(datetime.naive.time().hour()).expect("hour is always in 0..=23"),
+        u8::try_from(datetime.naive.time().minute()).expect("minute is always in 0..=59"),
+        u8::try_from(datetime.naive.time().second()).expect("second is always in 0..=59"),
+        datetime.naive.and_utc().timestamp_subsec_micros(),
     ))
 }
 
@@ -287,27 +305,21 @@ pub(crate) fn py_add(
     heap: &mut Heap<impl ResourceTracker>,
     _interns: &Interns,
 ) -> Result<Option<Value>, ResourceError> {
-    let delta_micros = timedelta::total_microseconds(delta);
-    let Ok(delta_micros_i64) = i64::try_from(delta_micros) else {
-        return Ok(None);
-    };
+    let chrono_delta = timedelta::chrono_delta(delta);
 
-    let next = if let Some(offset) = datetime.time.tz_offset {
-        let Some(utc_micros) = utc_micros(datetime) else {
+    let next = if let Some(offset) = datetime.offset_seconds {
+        let Some(utc) = to_utc_naive(datetime) else {
             return Ok(None);
         };
-        let Some(next_utc_micros) = utc_micros.checked_add(delta_micros_i64) else {
+        let Some(next_utc) = utc.checked_add_signed(chrono_delta) else {
             return Ok(None);
         };
-        from_utc_micros_with_offset(next_utc_micros, offset)
+        from_utc_naive_with_offset(next_utc, offset)
     } else {
-        let Some(local_unix_micros) = local_micros(datetime) else {
+        let Some(next_local) = datetime.naive.checked_add_signed(chrono_delta) else {
             return Ok(None);
         };
-        let Some(next_local_unix_micros) = local_unix_micros.checked_add(delta_micros_i64) else {
-            return Ok(None);
-        };
-        from_local_unix_micros(next_local_unix_micros)
+        from_local_naive(next_local)
     };
 
     let Some(next) = next else {
@@ -322,27 +334,21 @@ pub(crate) fn py_sub_timedelta(
     delta: &TimeDelta,
     heap: &mut Heap<impl ResourceTracker>,
 ) -> Result<Option<Value>, ResourceError> {
-    let delta_micros = timedelta::total_microseconds(delta);
-    let Ok(delta_micros_i64) = i64::try_from(delta_micros) else {
-        return Ok(None);
-    };
+    let chrono_delta = timedelta::chrono_delta(delta);
 
-    let next = if let Some(offset) = datetime.time.tz_offset {
-        let Some(utc_micros) = utc_micros(datetime) else {
+    let next = if let Some(offset) = datetime.offset_seconds {
+        let Some(utc) = to_utc_naive(datetime) else {
             return Ok(None);
         };
-        let Some(next_utc_micros) = utc_micros.checked_sub(delta_micros_i64) else {
+        let Some(next_utc) = utc.checked_sub_signed(chrono_delta) else {
             return Ok(None);
         };
-        from_utc_micros_with_offset(next_utc_micros, offset)
+        from_utc_naive_with_offset(next_utc, offset)
     } else {
-        let Some(local_unix_micros) = local_micros(datetime) else {
+        let Some(next_local) = datetime.naive.checked_sub_signed(chrono_delta) else {
             return Ok(None);
         };
-        let Some(next_local_unix_micros) = local_unix_micros.checked_sub(delta_micros_i64) else {
-            return Ok(None);
-        };
-        from_local_unix_micros(next_local_unix_micros)
+        from_local_naive(next_local)
     };
 
     let Some(next) = next else {
@@ -367,75 +373,90 @@ fn tzinfo_from_value(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunRes
         Value::Ref(id) => match heap.get(*id) {
             HeapData::TimeZone(tz) => Ok(Some(tz.clone())),
             _ => Err(ExcType::type_error(format!(
-                "tzinfo argument must be None or datetime.timezone, not {}",
+                "tzinfo argument must be datetime.timezone or None, not {}",
                 value.py_type(heap)
             ))),
         },
         _ => Err(ExcType::type_error(format!(
-            "tzinfo argument must be None or datetime.timezone, not {}",
+            "tzinfo argument must be datetime.timezone or None, not {}",
             value.py_type(heap)
         ))),
     }
 }
 
-/// Returns local civil microseconds since Unix epoch.
+/// Returns local wall-clock microseconds since Unix epoch for the datetime.
 #[must_use]
 pub(crate) fn local_micros(datetime: &DateTime) -> Option<i64> {
-    if datetime.date.year == 0 {
+    if !year_in_python_range(datetime.naive.date().year()) {
         return None;
     }
-    let second = datetime.timestamp();
-    let base = second.checked_mul(MICROS_PER_SECOND)?;
-    base.checked_add(i64::from(datetime.time.microsecond))
+    Some(datetime.naive.and_utc().timestamp_micros())
 }
 
-/// Returns UTC microseconds since Unix epoch for aware datetimes.
+/// Returns UTC microseconds since Unix epoch for aware datetimes, otherwise local micros.
 #[must_use]
 pub(crate) fn utc_micros(datetime: &DateTime) -> Option<i64> {
-    let local_unix_micros = local_micros(datetime)?;
-    match datetime.time.tz_offset {
-        Some(offset_seconds) => {
-            let offset_micros = checked_offset_micros(offset_seconds)?;
-            local_unix_micros.checked_sub(offset_micros)
+    match datetime.offset_seconds {
+        Some(_) => {
+            let utc = to_utc_naive(datetime)?;
+            Some(utc.and_utc().timestamp_micros())
         }
-        None => Some(local_unix_micros),
+        None => local_micros(datetime),
     }
 }
 
 fn from_local_unix_micros(local_unix_micros: i64) -> Option<DateTime> {
-    let second = local_unix_micros.div_euclid(MICROS_PER_SECOND);
-    let microsecond = local_unix_micros.rem_euclid(MICROS_PER_SECOND);
-    let config = DateTimeConfigBuilder::new()
-        .timestamp_unit(TimestampUnit::Second)
-        .build();
-    let datetime = DateTime::from_timestamp_with_config(second, u32::try_from(microsecond).ok()?, &config).ok()?;
-    if datetime.date.year == 0 {
-        return None;
-    }
-    Some(datetime)
+    let datetime = ChronoDateTime::<Utc>::from_timestamp_micros(local_unix_micros)?;
+    from_local_naive(datetime.naive_utc())
 }
 
 fn from_utc_micros_with_offset(utc_micros: i64, offset_seconds: i32) -> Option<DateTime> {
-    let offset_micros = checked_offset_micros(offset_seconds)?;
-    let local_unix_micros = utc_micros.checked_add(offset_micros)?;
-    let mut datetime = from_local_unix_micros(local_unix_micros)?;
-    datetime.time.tz_offset = Some(offset_seconds);
-    Some(datetime)
+    let datetime = ChronoDateTime::<Utc>::from_timestamp_micros(utc_micros)?;
+    from_utc_naive_with_offset(datetime.naive_utc(), offset_seconds)
+}
+
+fn from_local_naive(naive: NaiveDateTime) -> Option<DateTime> {
+    if !year_in_python_range(naive.date().year()) {
+        return None;
+    }
+    Some(DateTime {
+        naive,
+        offset_seconds: None,
+    })
+}
+
+fn from_utc_naive_with_offset(utc_naive: NaiveDateTime, offset_seconds: i32) -> Option<DateTime> {
+    FixedOffset::east_opt(offset_seconds)?;
+    let offset_delta = ChronoTimeDelta::try_seconds(i64::from(offset_seconds))?;
+    let local = utc_naive.checked_add_signed(offset_delta)?;
+    if !year_in_python_range(local.date().year()) {
+        return None;
+    }
+    Some(DateTime {
+        naive: local,
+        offset_seconds: Some(offset_seconds),
+    })
+}
+
+fn to_utc_naive(datetime: &DateTime) -> Option<NaiveDateTime> {
+    let offset_seconds = datetime.offset_seconds?;
+    let offset_delta = ChronoTimeDelta::try_seconds(i64::from(offset_seconds))?;
+    datetime.naive.checked_sub_signed(offset_delta)
 }
 
 fn checked_offset_micros(offset_seconds: i32) -> Option<i64> {
     i64::from(offset_seconds).checked_mul(MICROS_PER_SECOND)
 }
 
-/// Converts a rounded finite `f64` to `i64`.
-///
-/// Callers must validate bounds before invoking this helper.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "callers check finite i64 bounds before casting"
-)]
 fn rounded_f64_to_i64(value: f64) -> i64 {
-    value as i64
+    value
+        .to_i64()
+        .expect("rounded timestamp should always fit i64 after explicit range check")
+}
+
+#[must_use]
+fn year_in_python_range(year: i32) -> bool {
+    (1..=9999).contains(&year)
 }
 
 impl PyTrait for DateTime {
@@ -548,24 +569,20 @@ impl PyTrait for DateTime {
         if is_aware(self) != is_aware(other) {
             return Ok(None);
         }
+
         let diff = if is_aware(self) {
-            let Some(lhs_utc_micros) = utc_micros(self) else {
+            let Some(lhs_utc) = to_utc_naive(self) else {
                 return Ok(None);
             };
-            let Some(rhs_utc_micros) = utc_micros(other) else {
+            let Some(rhs_utc) = to_utc_naive(other) else {
                 return Ok(None);
             };
-            i128::from(lhs_utc_micros) - i128::from(rhs_utc_micros)
+            lhs_utc.signed_duration_since(rhs_utc)
         } else {
-            let Some(lhs_local_micros) = local_micros(self) else {
-                return Ok(None);
-            };
-            let Some(rhs_local_micros) = local_micros(other) else {
-                return Ok(None);
-            };
-            i128::from(lhs_local_micros) - i128::from(rhs_local_micros)
+            self.naive.signed_duration_since(other.naive)
         };
-        let Ok(delta) = timedelta::from_total_microseconds(diff) else {
+
+        let Ok(delta) = timedelta::from_chrono(diff) else {
             return Ok(None);
         };
         Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
@@ -601,7 +618,7 @@ struct LegacyDateTime {
 }
 
 /// Serde adapter that preserves the previous `(micros, offset_seconds)` snapshot format.
-pub(crate) mod serde_speedate_datetime {
+pub(crate) mod serde_chrono_datetime {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
 
     use super::{
@@ -609,7 +626,7 @@ pub(crate) mod serde_speedate_datetime {
         local_micros, offset_seconds, utc_micros,
     };
 
-    /// Serializes a `speedate::DateTime` using the previous internal micros format.
+    /// Serializes a chrono-backed `DateTime` using the previous internal micros format.
     pub(crate) fn serialize<S>(datetime: &DateTime, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -620,6 +637,7 @@ pub(crate) mod serde_speedate_datetime {
             local_micros(datetime)
         }
         .ok_or_else(|| S::Error::custom(DATE_OUT_OF_RANGE))?;
+
         LegacyDateTime {
             micros,
             offset_seconds: offset_seconds(datetime),
@@ -627,7 +645,7 @@ pub(crate) mod serde_speedate_datetime {
         .serialize(serializer)
     }
 
-    /// Deserializes a `speedate::DateTime` from the previous internal micros format.
+    /// Deserializes a chrono-backed `DateTime` from the previous internal micros format.
     pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<DateTime, D::Error>
     where
         D: Deserializer<'de>,
