@@ -52,6 +52,9 @@ pub(crate) fn from_components(
     if !(1..=12).contains(&month) {
         return Err(SimpleException::new_msg(ExcType::ValueError, "month must be in 1..12").into());
     }
+    if !(1..=31).contains(&day) {
+        return Err(SimpleException::new_msg(ExcType::ValueError, "day is out of range for month").into());
+    }
     if !(0..=23).contains(&hour) {
         return Err(SimpleException::new_msg(ExcType::ValueError, "hour must be in 0..23").into());
     }
