@@ -22,6 +22,7 @@ from typing import (
     final,
     overload,
 )
+
 from typing_extensions import Buffer, LiteralString, Self as _Self, TypeAlias
 
 _KT = TypeVar('_KT')
@@ -37,10 +38,10 @@ _T_contra = TypeVar('_T_contra', contravariant=True)
 # in metaclasses:
 #     def __new__(cls: type[Self], ...) -> Self: ...
 # In other cases, use `typing_extensions.Self`.
-Self = TypeVar('Self')  # noqa: Y001
+Self = TypeVar('Self')
 
 # covariant version of typing.AnyStr, useful for protocols
-AnyStr_co = TypeVar('AnyStr_co', str, bytes, covariant=True)  # noqa: Y001
+AnyStr_co = TypeVar('AnyStr_co', str, bytes, covariant=True)
 
 # For partially known annotations. Usually, fields where type annotations
 # haven't been added are left unannotated, but in some situations this
@@ -104,7 +105,7 @@ class SupportsAllComparisons(
 ): ...
 
 SupportsRichComparison: TypeAlias = SupportsDunderLT[Any] | SupportsDunderGT[Any]
-SupportsRichComparisonT = TypeVar('SupportsRichComparisonT', bound=SupportsRichComparison)  # noqa: Y001
+SupportsRichComparisonT = TypeVar('SupportsRichComparisonT', bound=SupportsRichComparison)
 
 # Dunder protocols
 
@@ -346,11 +347,11 @@ class structseq(Generic[_T_co]):
         def __replace__(self, **kwargs: Any) -> _Self: ...
 
 # Superset of typing.AnyStr that also includes LiteralString
-AnyOrLiteralStr = TypeVar('AnyOrLiteralStr', str, bytes, LiteralString)  # noqa: Y001
+AnyOrLiteralStr = TypeVar('AnyOrLiteralStr', str, bytes, LiteralString)
 
 # Represents when str or LiteralStr is acceptable. Useful for string processing
 # APIs where literalness of return value depends on literalness of inputs
-StrOrLiteralStr = TypeVar('StrOrLiteralStr', LiteralString, str)  # noqa: Y001
+StrOrLiteralStr = TypeVar('StrOrLiteralStr', LiteralString, str)
 
 # Objects suitable to be passed to sys.setprofile, threading.setprofile, and similar
 ProfileFunction: TypeAlias = Callable[[FrameType, str, Any], object]

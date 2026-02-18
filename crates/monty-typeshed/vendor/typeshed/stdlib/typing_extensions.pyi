@@ -2,7 +2,6 @@ import abc
 import enum
 import sys
 from _collections_abc import dict_items, dict_keys, dict_values
-from _typeshed import AnnotationForm, IdentityFunction, Incomplete, Unused
 from collections.abc import (
     AsyncGenerator as AsyncGenerator,
     AsyncIterable as AsyncIterable,
@@ -30,7 +29,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager as AsyncContextManager, AbstractContextManager as ContextManager
 from re import Match as Match, Pattern as Pattern
 from types import GenericAlias, ModuleType
-from typing import (  # noqa: Y022,Y037,Y038,Y039,UP035,RUF100
+from typing import (
     IO as IO,
     TYPE_CHECKING as TYPE_CHECKING,
     AbstractSet as AbstractSet,
@@ -66,6 +65,8 @@ from typing import (  # noqa: Y022,Y037,Y038,Y039,UP035,RUF100
     overload as overload,
     type_check_only,
 )
+
+from _typeshed import AnnotationForm, IdentityFunction, Incomplete, Unused
 
 if sys.version_info >= (3, 10):
     from types import UnionType
@@ -667,7 +668,7 @@ else:
         globals: Mapping[str, Any] | None = None,  # value types depend on the key
         locals: Mapping[str, Any] | None = None,  # value types depend on the key
         eval_str: bool = False,
-        format: Format = Format.VALUE,  # noqa: Y011
+        format: Format = Format.VALUE,
     ) -> dict[str, AnnotationForm]: ...
     @overload
     def evaluate_forward_ref(
