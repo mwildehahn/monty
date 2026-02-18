@@ -1,12 +1,12 @@
 //! Binary and in-place operation helpers for the VM.
 
-use super::VM;
+use super::{VM, datetime_awareness};
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError, SimpleException},
     heap::{HeapData, HeapGuard},
     resource::ResourceTracker,
-    types::{PyTrait, datetime, timedelta},
+    types::{PyTrait, timedelta},
     value::{BitwiseOp, Value},
 };
 
@@ -263,19 +263,6 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         lhs.drop_with_heap(self.heap);
         rhs.drop_with_heap(self.heap);
         Err(ExcType::not_implemented("matrix multiplication (@) is not supported").into())
-    }
-}
-
-/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
-///
-/// Returns `None` when the value is not a datetime reference.
-fn datetime_awareness(value: &crate::value::Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> Option<bool> {
-    let crate::value::Value::Ref(id) = value else {
-        return None;
-    };
-    match heap.get(*id) {
-        HeapData::DateTime(dt) => Some(datetime::is_aware(dt)),
-        _ => None,
     }
 }
 

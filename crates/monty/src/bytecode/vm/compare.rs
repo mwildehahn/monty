@@ -1,12 +1,11 @@
 //! Comparison operation helpers for the VM.
 
-use super::VM;
+use super::{VM, datetime_awareness};
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
-    heap::HeapData,
     resource::{DepthGuard, ResourceTracker},
-    types::{LongInt, PyTrait, datetime},
+    types::{LongInt, PyTrait},
     value::Value,
 };
 
@@ -162,18 +161,5 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
                 Err(e) => Err(e),
             }
         }
-    }
-}
-
-/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
-///
-/// Returns `None` when the value is not a datetime reference.
-fn datetime_awareness(value: &Value, heap: &crate::heap::Heap<impl ResourceTracker>) -> Option<bool> {
-    let Value::Ref(id) = value else {
-        return None;
-    };
-    match heap.get(*id) {
-        HeapData::DateTime(dt) => Some(datetime::is_aware(dt)),
-        _ => None,
     }
 }

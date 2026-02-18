@@ -118,6 +118,19 @@ macro_rules! fetch_u16 {
     }};
 }
 
+/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
+///
+/// Returns `None` when the value is not a datetime reference.
+fn datetime_awareness(value: &Value, heap: &Heap<impl ResourceTracker>) -> Option<bool> {
+    let Value::Ref(id) = value else {
+        return None;
+    };
+    match heap.get(*id) {
+        HeapData::DateTime(dt) => Some(crate::types::datetime::is_aware(dt)),
+        _ => None,
+    }
+}
+
 /// Fetches an i16 operand (little-endian) using cached code/ip.
 macro_rules! fetch_i16 {
     ($cached_frame:expr) => {{
