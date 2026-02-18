@@ -41,7 +41,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
     }
 
     /// Ordering comparison with a predicate.
-    pub(super) fn compare_ord<F>(&mut self, check: F) -> Result<(), RunError>
+    pub(super) fn compare_ord<F>(&mut self, op: &'static str, check: F) -> Result<(), RunError>
     where
         F: FnOnce(std::cmp::Ordering) -> bool,
     {
@@ -65,7 +65,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             }
             let lhs_type = lhs.py_type(this.heap);
             let rhs_type = rhs.py_type(this.heap);
-            return Err(ExcType::ordering_type_error(lhs_type, rhs_type));
+            return Err(ExcType::ordering_type_error(op, lhs_type, rhs_type));
         };
         this.push(Value::Bool(result));
         Ok(())

@@ -31,6 +31,7 @@ assert repr(datetime.timedelta(days=1, seconds=3600)) == 'datetime.timedelta(day
 )
 assert str(datetime.timedelta(days=1, seconds=3600)) == '1 day, 1:00:00', 'timedelta str should match CPython'
 assert repr(datetime.timezone.utc) == 'datetime.timezone.utc', 'timezone.utc repr should match CPython'
+assert datetime.timezone.utc is datetime.timezone.utc, 'timezone.utc should be a singleton identity value'
 assert (
     repr(datetime.timezone(datetime.timedelta(seconds=3600))) == 'datetime.timezone(datetime.timedelta(seconds=3600))'
 ), 'timezone repr should match CPython'
@@ -103,6 +104,14 @@ except TypeError as e:
     )
 
 try:
+    1 > 'x'
+    assert False, 'int > str should raise TypeError'
+except TypeError as e:
+    assert str(e) == "'>' not supported between instances of 'int' and 'str'", (
+        'ordering TypeError should include the actual operator'
+    )
+
+try:
     aware - naive
     assert False, 'aware - naive should raise TypeError'
 except TypeError as e:
@@ -114,6 +123,12 @@ except TypeError as e:
 assert datetime.timezone.utc == datetime.timezone(datetime.timedelta(0)), (
     'timezone.utc should equal zero offset timezone'
 )
+assert datetime.timezone(offset=datetime.timedelta(hours=1)) == datetime.timezone(datetime.timedelta(hours=1)), (
+    'timezone constructor should support the offset keyword'
+)
+assert datetime.timezone(datetime.timedelta(hours=1), name='A') == datetime.timezone(
+    datetime.timedelta(hours=1), 'A'
+), 'timezone constructor should support the name keyword'
 assert datetime.timezone(datetime.timedelta(hours=1), 'A') == datetime.timezone(datetime.timedelta(hours=1), 'B'), (
     'timezone equality should depend on offset, not name'
 )
@@ -132,6 +147,49 @@ except ValueError as e:
         'offset must be a timedelta strictly between -timedelta(hours=24) and timedelta(hours=24), '
         'not datetime.timedelta(days=1)'
     ), 'timezone range validation message should match CPython'
+
+# === duplicate argument bindings ===
+try:
+    datetime.datetime(2024, 1, 1, 1, hour=2)
+    assert False, 'datetime constructor should reject positional+keyword duplicate hour'
+except TypeError as e:
+    assert str(e) in {
+        "datetime() got multiple values for argument 'hour'",
+        "datetime() got multiple values for keyword argument 'hour'",
+        "argument for function given by name ('hour') and position (4)",
+    }, 'datetime duplicate hour should raise CPython-style duplicate-binding TypeError'
+
+try:
+    datetime.datetime(2024, 1, 1, 0, 0, 0, 0, datetime.timezone.utc, tzinfo=datetime.timezone.utc)
+    assert False, 'datetime constructor should reject positional+keyword duplicate tzinfo'
+except TypeError as e:
+    assert str(e) in {
+        "datetime() got multiple values for argument 'tzinfo'",
+        "datetime() got multiple values for keyword argument 'tzinfo'",
+        "argument for function given by name ('tzinfo') and position (8)",
+    }, 'datetime duplicate tzinfo should raise CPython-style duplicate-binding TypeError'
+
+try:
+    datetime.timezone(datetime.timedelta(hours=1), offset=datetime.timedelta(hours=1))
+    assert False, 'timezone constructor should reject positional+keyword duplicate offset'
+except TypeError as e:
+    assert str(e) in {
+        "timezone() got multiple values for argument 'offset'",
+        "timezone() got multiple values for keyword argument 'offset'",
+        "argument for timezone() given by name ('offset') and position (1)",
+    }, 'timezone duplicate offset should raise duplicate-binding TypeError'
+
+try:
+    datetime.timezone(datetime.timedelta(hours=1), 'A', name='B')
+    assert False, 'timezone constructor should reject 3 arguments even when name is also provided by keyword'
+except TypeError as e:
+    assert str(e) in {
+        'timezone expected at most 2 arguments, got 3',
+        'timezone() takes at most 2 arguments (3 given)',
+        "timezone() got multiple values for argument 'name'",
+        "timezone() got multiple values for keyword argument 'name'",
+        "argument for timezone() given by name ('name') and position (2)",
+    }, 'timezone constructor should reject positional+keyword duplicate name or 3-argument over-binding'
 
 # === arithmetic overflow errors ===
 try:

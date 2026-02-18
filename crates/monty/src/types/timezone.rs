@@ -8,7 +8,7 @@ use ahash::AHashSet;
 
 use crate::{
     args::ArgValues,
-    defer_drop,
+    defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
@@ -57,16 +57,65 @@ impl TimeZone {
 
     /// Parses timezone constructor arguments.
     pub fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
-        let (offset_arg, name_arg) = args.get_one_two_args("timezone", heap)?;
-        defer_drop!(offset_arg, heap);
+        let (pos, kwargs) = args.into_parts();
+        defer_drop_mut!(pos, heap);
+        let kwargs = kwargs.into_iter();
+        defer_drop_mut!(kwargs, heap);
 
-        let offset_seconds = extract_offset_seconds(offset_arg, heap)?;
-        let name = if let Some(name_arg) = name_arg {
-            defer_drop!(name_arg, heap);
-            extract_name(name_arg, heap, interns)?
-        } else {
-            None
+        let mut offset_seconds: Option<i32> = None;
+        let mut name: Option<Option<String>> = None;
+        let mut seen_offset = false;
+        let mut seen_name = false;
+
+        for (index, arg) in pos.by_ref().enumerate() {
+            defer_drop!(arg, heap);
+            match index {
+                0 => {
+                    offset_seconds = Some(extract_offset_seconds(arg, heap)?);
+                    seen_offset = true;
+                }
+                1 => {
+                    name = Some(extract_name(arg, heap, interns)?);
+                    seen_name = true;
+                }
+                _ => return Err(ExcType::type_error_at_most("timezone", 2, index + 1)),
+            }
+        }
+
+        for (key, value) in kwargs {
+            defer_drop!(key, heap);
+            defer_drop!(value, heap);
+
+            let Some(key_name) = key.as_either_str(heap) else {
+                return Err(ExcType::type_error_kwargs_nonstring_key());
+            };
+            let key_name = key_name.as_str(interns);
+            match key_name {
+                "offset" => {
+                    if seen_offset {
+                        return Err(ExcType::type_error_multiple_values("timezone", "offset"));
+                    }
+                    offset_seconds = Some(extract_offset_seconds(value, heap)?);
+                    seen_offset = true;
+                }
+                "name" => {
+                    if seen_name {
+                        return Err(ExcType::type_error_multiple_values("timezone", "name"));
+                    }
+                    name = Some(extract_name(value, heap, interns)?);
+                    seen_name = true;
+                }
+                _ => return Err(ExcType::type_error_unexpected_keyword("timezone", key_name)),
+            }
+        }
+
+        let Some(offset_seconds) = offset_seconds else {
+            return Err(ExcType::type_error_missing_positional_with_names(
+                "timezone",
+                &["offset"],
+            ));
         };
+        let name = name.unwrap_or(None);
 
         let tz = Self::new(offset_seconds, name)?;
         Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))

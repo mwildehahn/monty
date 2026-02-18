@@ -171,6 +171,11 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
     let mut second: i32 = 0;
     let mut microsecond: i32 = 0;
     let mut tzinfo: Option<TimeZone> = None;
+    let mut seen_hour = false;
+    let mut seen_minute = false;
+    let mut seen_second = false;
+    let mut seen_microsecond = false;
+    let mut seen_tzinfo = false;
 
     for (index, arg) in pos.by_ref().enumerate() {
         defer_drop!(arg, heap);
@@ -178,11 +183,26 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
             0 => year = Some(value_to_i32(arg, heap)?),
             1 => month = Some(value_to_i32(arg, heap)?),
             2 => day = Some(value_to_i32(arg, heap)?),
-            3 => hour = value_to_i32(arg, heap)?,
-            4 => minute = value_to_i32(arg, heap)?,
-            5 => second = value_to_i32(arg, heap)?,
-            6 => microsecond = value_to_i32(arg, heap)?,
-            7 => tzinfo = tzinfo_from_value(arg, heap)?,
+            3 => {
+                hour = value_to_i32(arg, heap)?;
+                seen_hour = true;
+            }
+            4 => {
+                minute = value_to_i32(arg, heap)?;
+                seen_minute = true;
+            }
+            5 => {
+                second = value_to_i32(arg, heap)?;
+                seen_second = true;
+            }
+            6 => {
+                microsecond = value_to_i32(arg, heap)?;
+                seen_microsecond = true;
+            }
+            7 => {
+                tzinfo = tzinfo_from_value(arg, heap)?;
+                seen_tzinfo = true;
+            }
             _ => return Err(ExcType::type_error_at_most("datetime", 8, index + 1)),
         }
     }
@@ -213,11 +233,41 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
                 }
                 day = Some(value_to_i32(value, heap)?);
             }
-            "hour" => hour = value_to_i32(value, heap)?,
-            "minute" => minute = value_to_i32(value, heap)?,
-            "second" => second = value_to_i32(value, heap)?,
-            "microsecond" => microsecond = value_to_i32(value, heap)?,
-            "tzinfo" => tzinfo = tzinfo_from_value(value, heap)?,
+            "hour" => {
+                if seen_hour {
+                    return Err(ExcType::type_error_multiple_values("datetime", "hour"));
+                }
+                hour = value_to_i32(value, heap)?;
+                seen_hour = true;
+            }
+            "minute" => {
+                if seen_minute {
+                    return Err(ExcType::type_error_multiple_values("datetime", "minute"));
+                }
+                minute = value_to_i32(value, heap)?;
+                seen_minute = true;
+            }
+            "second" => {
+                if seen_second {
+                    return Err(ExcType::type_error_multiple_values("datetime", "second"));
+                }
+                second = value_to_i32(value, heap)?;
+                seen_second = true;
+            }
+            "microsecond" => {
+                if seen_microsecond {
+                    return Err(ExcType::type_error_multiple_values("datetime", "microsecond"));
+                }
+                microsecond = value_to_i32(value, heap)?;
+                seen_microsecond = true;
+            }
+            "tzinfo" => {
+                if seen_tzinfo {
+                    return Err(ExcType::type_error_multiple_values("datetime", "tzinfo"));
+                }
+                tzinfo = tzinfo_from_value(value, heap)?;
+                seen_tzinfo = true;
+            }
             _ => return Err(ExcType::type_error_unexpected_keyword("datetime", key_name)),
         }
     }

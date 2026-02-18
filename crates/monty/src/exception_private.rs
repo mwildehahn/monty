@@ -913,13 +913,12 @@ impl ExcType {
     /// Creates a TypeError for unsupported ordering comparisons.
     ///
     /// Matches CPython's format:
-    /// `'<'
-    /// not supported between instances of '{left}' and '{right}'`
+    /// `'{op}' not supported between instances of '{left}' and '{right}'`
     #[must_use]
-    pub(crate) fn ordering_type_error(lhs_type: Type, rhs_type: Type) -> RunError {
+    pub(crate) fn ordering_type_error(op: &str, lhs_type: Type, rhs_type: Type) -> RunError {
         SimpleException::new_msg(
             Self::TypeError,
-            format!("'<' not supported between instances of '{lhs_type}' and '{rhs_type}'"),
+            format!("'{op}' not supported between instances of '{lhs_type}' and '{rhs_type}'"),
         )
         .into()
     }
