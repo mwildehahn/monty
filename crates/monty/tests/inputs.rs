@@ -224,7 +224,7 @@ fn empty_string_input() {
 
 #[test]
 fn input_date_roundtrip() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let input = MontyObject::Date {
         year: 2024,
         month: 1,
@@ -236,7 +236,7 @@ fn input_date_roundtrip() {
 
 #[test]
 fn input_datetime_roundtrip_aware() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let input = MontyObject::DateTime {
         year: 2024,
         month: 1,
@@ -253,7 +253,7 @@ fn input_datetime_roundtrip_aware() {
 
 #[test]
 fn input_timedelta_roundtrip() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let input = MontyObject::TimeDelta {
         days: 1,
         seconds: 2,
@@ -265,7 +265,7 @@ fn input_timedelta_roundtrip() {
 
 #[test]
 fn input_timezone_roundtrip() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let input = MontyObject::TimeZone {
         offset_seconds: 3_600,
         name: Some("X".to_string()),
@@ -285,7 +285,7 @@ import datetime
     datetime.timezone(datetime.timedelta(seconds=61), 'N'),
 )
 ";
-    let ex = MontyRun::new(code.to_owned(), "test.py", vec![], vec![]).unwrap();
+    let ex = MontyRun::new(code.to_owned(), "test.py", vec![]).unwrap();
     let result = ex.run_no_limits(vec![]).unwrap();
     assert_eq!(
         result,
@@ -408,7 +408,7 @@ fn invalid_input_repr_nested_in_list() {
 
 #[test]
 fn invalid_input_date_out_of_range() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let result = ex.run_no_limits(vec![MontyObject::Date {
         year: 0,
         month: 1,
@@ -419,7 +419,7 @@ fn invalid_input_date_out_of_range() {
 
 #[test]
 fn invalid_input_datetime_out_of_range() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let result = ex.run_no_limits(vec![MontyObject::DateTime {
         year: 2024,
         month: 1,
@@ -435,7 +435,7 @@ fn invalid_input_datetime_out_of_range() {
 
 #[test]
 fn invalid_input_timedelta_out_of_range() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let result = ex.run_no_limits(vec![MontyObject::TimeDelta {
         days: 1_000_000_000,
         seconds: 0,
@@ -446,7 +446,7 @@ fn invalid_input_timedelta_out_of_range() {
 
 #[test]
 fn invalid_input_timezone_out_of_range() {
-    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
+    let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()]).unwrap();
     let result = ex.run_no_limits(vec![MontyObject::TimeZone {
         offset_seconds: 86_400,
         name: None,
