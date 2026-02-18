@@ -23,7 +23,7 @@ use crate::{
     modules::ModuleFunctions,
     resource::{ResourceError, ResourceTracker, check_div_size, check_lshift_size, check_pow_size, check_repeat_size},
     types::{
-        AttrCallResult, LongInt, Property, PyTrait, Str, TimeZone, Type,
+        AttrCallResult, LongInt, Property, PyTrait, Str, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
         path,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
@@ -1657,8 +1657,7 @@ impl Value {
                 }
                 // `datetime.timezone.utc` class attribute.
                 if *t == Type::TimeZone && attr.as_str(interns) == "utc" {
-                    let tz_id = heap.allocate(HeapData::TimeZone(TimeZone::utc()))?;
-                    return Ok(AttrCallResult::Value(Self::Ref(tz_id)));
+                    return Ok(AttrCallResult::Value(heap.get_timezone_utc()?));
                 }
             }
             _ => {}

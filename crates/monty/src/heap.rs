@@ -1017,17 +1017,20 @@ pub(crate) struct Heap<T: ResourceTracker> {
     /// Uses `Cell` for interior mutability so that methods with only `&Heap`
     /// (like `py_repr_fmt`) can still increment/decrement the depth counter.
     recursion_depth: Cell<usize>,
+    /// Cached `datetime.timezone.utc` singleton heap ID, allocated lazily on first access.
+    timezone_utc: Option<HeapId>,
 }
 
 impl<T: ResourceTracker + serde::Serialize> serde::Serialize for Heap<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Heap", 6)?;
+        let mut state = serializer.serialize_struct("Heap", 7)?;
         state.serialize_field("entries", &self.entries)?;
         state.serialize_field("free_list", &self.free_list)?;
         state.serialize_field("tracker", &self.tracker)?;
         state.serialize_field("may_have_cycles", &self.may_have_cycles)?;
         state.serialize_field("allocations_since_gc", &self.allocations_since_gc)?;
+        state.serialize_field("timezone_utc", &self.timezone_utc)?;
         state.end()
     }
 }
@@ -1041,6 +1044,8 @@ impl<'de, T: ResourceTracker + serde::Deserialize<'de>> serde::Deserialize<'de> 
             tracker: T,
             may_have_cycles: bool,
             allocations_since_gc: u32,
+            #[serde(default)]
+            timezone_utc: Option<HeapId>,
         }
         let fields = HeapFields::<T>::deserialize(deserializer)?;
         Ok(Self {
@@ -1050,6 +1055,7 @@ impl<'de, T: ResourceTracker + serde::Deserialize<'de>> serde::Deserialize<'de> 
             may_have_cycles: fields.may_have_cycles,
             allocations_since_gc: fields.allocations_since_gc,
             recursion_depth: Cell::new(0),
+            timezone_utc: fields.timezone_utc,
         })
     }
 }
@@ -1098,6 +1104,7 @@ impl<T: ResourceTracker> Heap<T> {
             may_have_cycles: false,
             allocations_since_gc: 0,
             recursion_depth: Cell::new(0),
+            timezone_utc: None,
         };
         // TBC: should the empty tuple contribute to the resource limits?
         // If not, can just place it in `entries` directly without going through `allocate()`.
@@ -1265,6 +1272,23 @@ impl<T: ResourceTracker> Heap<T> {
         // Return existing singleton with incremented refcount
         self.inc_ref(EMPTY_TUPLE_ID);
         Value::Ref(EMPTY_TUPLE_ID)
+    }
+
+    /// Returns the singleton `datetime.timezone.utc` value.
+    ///
+    /// The singleton is allocated lazily on first access and reused thereafter so
+    /// identity checks (`datetime.timezone.utc is datetime.timezone.utc`) behave
+    /// like CPython.
+    pub fn get_timezone_utc(&mut self) -> Result<Value, ResourceError> {
+        let id = if let Some(id) = self.timezone_utc {
+            id
+        } else {
+            let id = self.allocate(HeapData::TimeZone(TimeZone::utc()))?;
+            self.timezone_utc = Some(id);
+            id
+        };
+        self.inc_ref(id);
+        Ok(Value::Ref(id))
     }
 
     /// Increments the reference count for an existing heap entry.
