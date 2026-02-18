@@ -8,7 +8,6 @@ use std::fmt::Write;
 
 use ahash::AHashSet;
 use chrono::TimeDelta as ChronoTimeDelta;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     args::ArgValues,
@@ -30,7 +29,7 @@ const DAY_SECONDS: i128 = 86_400;
 const DAY_MICROSECONDS: i128 = DAY_SECONDS * 1_000_000;
 
 /// `datetime.timedelta` storage backed by `chrono::TimeDelta`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TimeDelta(pub(crate) ChronoTimeDelta);
 
 /// Creates a normalized timedelta value from CPython components.
@@ -366,42 +365,5 @@ impl PyTrait for TimeDelta {
 
     fn py_estimate_size(&self) -> usize {
         std::mem::size_of::<Self>()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct LegacyTimeDelta {
-    days: i32,
-    seconds: i32,
-    microseconds: i32,
-}
-
-/// Serde adapter that preserves the previous `(days, seconds, microseconds)` snapshot format.
-pub(crate) mod serde_chrono_timedelta {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-
-    use super::{LegacyTimeDelta, TimeDelta, components, new};
-
-    /// Serializes `chrono::TimeDelta` using CPython timedelta fields.
-    pub(crate) fn serialize<S>(delta: &TimeDelta, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let (days, seconds, microseconds) = components(delta);
-        LegacyTimeDelta {
-            days,
-            seconds,
-            microseconds,
-        }
-        .serialize(serializer)
-    }
-
-    /// Deserializes `chrono::TimeDelta` from CPython timedelta fields.
-    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimeDelta, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let legacy = LegacyTimeDelta::deserialize(deserializer)?;
-        new(legacy.days, legacy.seconds, legacy.microseconds).map_err(|err| D::Error::custom(format!("{err:?}")))
     }
 }

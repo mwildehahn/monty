@@ -7,7 +7,6 @@ use std::fmt::Write;
 
 use ahash::AHashSet;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     args::ArgValues,
@@ -22,7 +21,7 @@ use crate::{
 };
 
 /// `datetime.date` storage backed by `chrono::NaiveDate`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Date(pub(crate) NaiveDate);
 
 /// Creates a date from validated civil components.
@@ -308,40 +307,4 @@ pub(crate) fn py_sub_date(
         return Ok(None);
     };
     Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
-}
-
-#[derive(Serialize, Deserialize)]
-struct LegacyDate {
-    ordinal: i32,
-}
-
-/// Serde adapter that preserves the previous ordinal snapshot representation.
-pub(crate) mod serde_chrono_date {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-
-    use super::{Date, LegacyDate, from_ordinal, to_ordinal};
-
-    /// Serializes a chrono-backed `Date` using the previous ordinal format.
-    #[expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "serde with-adapter serialize signature requires &Date"
-    )]
-    pub(crate) fn serialize<S>(date: &Date, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        LegacyDate {
-            ordinal: to_ordinal(*date),
-        }
-        .serialize(serializer)
-    }
-
-    /// Deserializes a chrono-backed `Date` from the previous ordinal format.
-    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Date, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let legacy = LegacyDate::deserialize(deserializer)?;
-        from_ordinal(legacy.ordinal).map_err(|err| D::Error::custom(format!("{err:?}")))
-    }
 }

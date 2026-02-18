@@ -87,11 +87,11 @@ pub(crate) enum HeapData {
     /// are immutable and hashable.
     Range(Range),
     /// A `datetime.date` value stored with `chrono::NaiveDate`.
-    Date(#[serde(with = "crate::types::date::serde_chrono_date")] Date),
+    Date(Date),
     /// A `datetime.datetime` value stored with chrono primitives.
-    DateTime(#[serde(with = "crate::types::datetime::serde_chrono_datetime")] DateTime),
+    DateTime(DateTime),
     /// A `datetime.timedelta` duration value stored with `chrono::TimeDelta`.
-    TimeDelta(#[serde(with = "crate::types::timedelta::serde_chrono_timedelta")] TimeDelta),
+    TimeDelta(TimeDelta),
     /// A fixed-offset `datetime.timezone` value.
     TimeZone(TimeZone),
     /// A slice object (e.g., `slice(1, 10, 2)` or from `x[1:10:2]`).

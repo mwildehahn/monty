@@ -11,7 +11,6 @@ use chrono::{
     Timelike, Utc,
 };
 use num_traits::ToPrimitive;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     args::ArgValues,
@@ -29,7 +28,7 @@ const MICROS_PER_SECOND: i64 = 1_000_000;
 const DATE_OUT_OF_RANGE: &str = "date value out of range";
 
 /// `datetime.datetime` storage backed by `chrono::NaiveDateTime` plus optional fixed offset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DateTime {
     naive: NaiveDateTime,
     offset_seconds: Option<i32>,
@@ -608,53 +607,5 @@ impl PyTrait for DateTime {
 
     fn py_estimate_size(&self) -> usize {
         std::mem::size_of::<Self>()
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct LegacyDateTime {
-    micros: i64,
-    offset_seconds: Option<i32>,
-}
-
-/// Serde adapter that preserves the previous `(micros, offset_seconds)` snapshot format.
-pub(crate) mod serde_chrono_datetime {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::Error as _};
-
-    use super::{
-        DATE_OUT_OF_RANGE, DateTime, LegacyDateTime, from_local_unix_micros, from_utc_micros_with_offset, is_aware,
-        local_micros, offset_seconds, utc_micros,
-    };
-
-    /// Serializes a chrono-backed `DateTime` using the previous internal micros format.
-    pub(crate) fn serialize<S>(datetime: &DateTime, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let micros = if is_aware(datetime) {
-            utc_micros(datetime)
-        } else {
-            local_micros(datetime)
-        }
-        .ok_or_else(|| S::Error::custom(DATE_OUT_OF_RANGE))?;
-
-        LegacyDateTime {
-            micros,
-            offset_seconds: offset_seconds(datetime),
-        }
-        .serialize(serializer)
-    }
-
-    /// Deserializes a chrono-backed `DateTime` from the previous internal micros format.
-    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<DateTime, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let legacy = LegacyDateTime::deserialize(deserializer)?;
-        let datetime = match legacy.offset_seconds {
-            Some(offset_seconds) => from_utc_micros_with_offset(legacy.micros, offset_seconds),
-            None => from_local_unix_micros(legacy.micros),
-        };
-        datetime.ok_or_else(|| D::Error::custom(DATE_OUT_OF_RANGE))
     }
 }
