@@ -18,6 +18,11 @@ assert str(now_utc) == '2023-11-14 22:13:20+00:00', 'datetime.now(timezone.utc) 
 plus_two = datetime.timezone(datetime.timedelta(hours=2))
 now_plus_two = datetime.datetime.now(plus_two)
 assert str(now_plus_two) == '2023-11-15 00:13:20+02:00', 'datetime.now() with fixed offset should adjust civil time'
+named_plus_two = datetime.timezone(datetime.timedelta(hours=2), 'PLUS2')
+now_named_plus_two = datetime.datetime.now(named_plus_two)
+assert repr(now_named_plus_two) == (
+    "datetime.datetime(2023, 11, 15, 0, 13, 20, tzinfo=datetime.timezone(datetime.timedelta(seconds=7200), 'PLUS2'))"
+), 'datetime.now() should preserve explicit timezone names on fixed-offset tzinfo'
 
 # === repr/str parity ===
 assert repr(datetime.date(2024, 1, 15)) == 'datetime.date(2024, 1, 15)', 'date repr should match CPython'
@@ -32,6 +37,9 @@ assert repr(datetime.timedelta(days=1, seconds=3600)) == 'datetime.timedelta(day
 assert str(datetime.timedelta(days=1, seconds=3600)) == '1 day, 1:00:00', 'timedelta str should match CPython'
 assert repr(datetime.timezone.utc) == 'datetime.timezone.utc', 'timezone.utc repr should match CPython'
 assert datetime.timezone.utc is datetime.timezone.utc, 'timezone.utc should be a singleton identity value'
+assert datetime.timezone(datetime.timedelta(0)) is datetime.timezone.utc, (
+    'timezone(timedelta(0)) should return the timezone.utc singleton'
+)
 assert (
     repr(datetime.timezone(datetime.timedelta(seconds=3600))) == 'datetime.timezone(datetime.timedelta(seconds=3600))'
 ), 'timezone repr should match CPython'
@@ -52,6 +60,14 @@ assert str(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timed
 assert repr(datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(seconds=-1)))) == (
     'datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=86399)))'
 ), 'datetime repr should use normalized negative timezone offsets'
+named_tz = datetime.timezone(datetime.timedelta(hours=1), 'X')
+named_dt = datetime.datetime(2024, 1, 1, tzinfo=named_tz)
+assert repr(named_dt) == (
+    "datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600), 'X'))"
+), 'datetime repr should preserve explicit timezone names'
+assert repr(named_dt.tzinfo) == "datetime.timezone(datetime.timedelta(seconds=3600), 'X')", (
+    'datetime.tzinfo should preserve explicit timezone names'
+)
 
 # === arithmetic ===
 assert datetime.date(2024, 1, 10) + datetime.timedelta(days=5) == datetime.date(2024, 1, 15), (

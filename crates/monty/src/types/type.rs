@@ -11,8 +11,8 @@ use crate::{
     intern::{StaticStrings, StringId},
     resource::ResourceTracker,
     types::{
-        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, TimeZone, Tuple,
-        bytes::bytes_fromhex, date, datetime, dict::dict_fromkeys, str::StringRepr, timedelta,
+        AttrCallResult, Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str,
+        TimeZone, Tuple, bytes::bytes_fromhex, date, datetime, dict::dict_fromkeys, str::StringRepr, timedelta,
     },
     value::Value,
 };
@@ -203,6 +203,32 @@ impl Type {
             12 => Some(Self::Iterator),
             13 => Some(Self::Path),
             _ => None,
+        }
+    }
+
+    /// Dispatches classmethod calls on builtin type objects (e.g. `dict.fromkeys`).
+    ///
+    /// Keeps classmethod behavior centralized with type semantics instead of VM call plumbing.
+    pub(crate) fn call_class_method(
+        self,
+        method_id: StringId,
+        args: ArgValues,
+        vm: &mut VM<'_, '_, impl ResourceTracker>,
+    ) -> RunResult<AttrCallResult> {
+        match (self, method_id) {
+            (Self::Dict, m) if m == StaticStrings::Fromkeys => {
+                crate::types::dict::dict_fromkeys(args, vm).map(AttrCallResult::Value)
+            }
+            (Self::Bytes, m) if m == StaticStrings::Fromhex => {
+                crate::types::bytes::bytes_fromhex(args, vm.heap, vm.interns).map(AttrCallResult::Value)
+            }
+            (Self::Date, m) if m == StaticStrings::Today => date::class_today(vm.heap, args),
+            (Self::DateTime, m) if m == StaticStrings::Now => datetime::class_now(vm.heap, args, vm.interns),
+            _ => {
+                let method_name = vm.interns.get_str(method_id);
+                args.drop_with_heap(vm.heap);
+                Err(ExcType::attribute_error(self, method_name))
+            }
         }
     }
 
