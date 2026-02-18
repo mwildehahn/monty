@@ -759,7 +759,7 @@ fn handle_vm_result<T: ResourceTracker>(
                 kwargs: kwargs_py,
                 call_id: call_id.raw(),
                 method_call: true,
-                state: new_snapshot!(call_id),
+                state: new_snapshot!(call_id, None),
             })
         }
         Ok(FrameExit::ResolveFutures(pending_call_ids)) => {
