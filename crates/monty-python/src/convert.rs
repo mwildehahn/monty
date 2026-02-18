@@ -4,7 +4,7 @@
 //! - `py_to_monty`: Convert Python objects to Monty's `MontyObject` for input
 //! - `monty_to_py`: Convert Monty's `MontyObject` back to Python objects for output
 
-use ::monty::MontyObject;
+use ::monty::{MontyDate, MontyDateTime, MontyObject, MontyTimeDelta, MontyTimeZone};
 use monty::MontyException;
 use num_bigint::BigInt;
 use pyo3::{
@@ -55,17 +55,20 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry) -> PyResult
     } else if let Ok(bytes) = obj.cast::<PyBytes>() {
         Ok(MontyObject::Bytes(bytes.extract()?))
     } else if let Ok(datetime) = obj.cast::<PyDateTime>() {
-        let offset_seconds = if let Some(tzinfo) = datetime.get_tzinfo() {
+        let (offset_seconds, timezone_name) = if let Some(tzinfo) = datetime.get_tzinfo() {
             if !tzinfo.as_any().is_instance(get_datetime_timezone(obj.py())?)? {
                 return Err(PyTypeError::new_err(
                     "Cannot convert datetime with non-timezone tzinfo to Monty value",
                 ));
             }
-            Some(extract_timezone_offset_seconds(&tzinfo)?)
+            (
+                Some(extract_timezone_offset_seconds(&tzinfo)?),
+                extract_explicit_timezone_name(tzinfo.as_any())?,
+            )
         } else {
-            None
+            (None, None)
         };
-        Ok(MontyObject::DateTime {
+        Ok(MontyObject::DateTime(MontyDateTime {
             year: datetime.get_year(),
             month: datetime.get_month(),
             day: datetime.get_day(),
@@ -74,29 +77,25 @@ pub fn py_to_monty(obj: &Bound<'_, PyAny>, dc_registry: &DcRegistry) -> PyResult
             second: datetime.get_second(),
             microsecond: datetime.get_microsecond(),
             offset_seconds,
-        })
+            timezone_name,
+        }))
     } else if let Ok(date) = obj.cast::<PyDate>() {
-        Ok(MontyObject::Date {
+        Ok(MontyObject::Date(MontyDate {
             year: date.get_year(),
             month: date.get_month(),
             day: date.get_day(),
-        })
+        }))
     } else if let Ok(delta) = obj.cast::<PyDelta>() {
-        Ok(MontyObject::TimeDelta {
+        Ok(MontyObject::TimeDelta(MontyTimeDelta {
             days: delta.get_days(),
             seconds: delta.get_seconds(),
             microseconds: delta.get_microseconds(),
-        })
+        }))
     } else if obj.is_instance(get_datetime_timezone(obj.py())?)? {
         let tzinfo = obj.cast::<PyTzInfo>()?;
         let offset_seconds = extract_timezone_offset_seconds(tzinfo)?;
-        let tzname = tzinfo.call_method1("tzname", (obj.py().None(),))?;
-        let name = if tzname.is_none() {
-            None
-        } else {
-            Some(tzname.extract()?)
-        };
-        Ok(MontyObject::TimeZone { offset_seconds, name })
+        let name = extract_explicit_timezone_name(tzinfo.as_any())?;
+        Ok(MontyObject::TimeZone(MontyTimeZone { offset_seconds, name }))
     } else if let Ok(list) = obj.cast::<PyList>() {
         let items: PyResult<Vec<MontyObject>> = list.iter().map(|item| py_to_monty(&item, dc_registry)).collect();
         Ok(MontyObject::List(items?))
@@ -184,46 +183,32 @@ pub fn monty_to_py(py: Python<'_>, obj: &MontyObject, dc_registry: &DcRegistry) 
                 items.iter().map(|item| monty_to_py(py, item, dc_registry)).collect();
             Ok(PyList::new(py, py_items?)?.into_any().unbind())
         }
-        MontyObject::Date { year, month, day } => Ok(PyDate::new(py, *year, *month, *day)?.into_any().unbind()),
-        MontyObject::DateTime {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-            microsecond,
-            offset_seconds,
-        } => {
-            let tzinfo = offset_seconds
-                .map(|offset| build_fixed_timezone(py, offset, None))
+        MontyObject::Date(date) => Ok(PyDate::new(py, date.year, date.month, date.day)?.into_any().unbind()),
+        MontyObject::DateTime(datetime) => {
+            let tzinfo = datetime
+                .offset_seconds
+                .map(|offset| build_fixed_timezone(py, offset, datetime.timezone_name.as_deref()))
                 .transpose()?;
             Ok(PyDateTime::new(
                 py,
-                *year,
-                *month,
-                *day,
-                *hour,
-                *minute,
-                *second,
-                *microsecond,
+                datetime.year,
+                datetime.month,
+                datetime.day,
+                datetime.hour,
+                datetime.minute,
+                datetime.second,
+                datetime.microsecond,
                 tzinfo.as_ref(),
             )?
             .into_any()
             .unbind())
         }
-        MontyObject::TimeDelta {
-            days,
-            seconds,
-            microseconds,
-        } => Ok(PyDelta::new(py, *days, *seconds, *microseconds, true)?
+        MontyObject::TimeDelta(delta) => Ok(PyDelta::new(py, delta.days, delta.seconds, delta.microseconds, true)?
             .into_any()
             .unbind()),
-        MontyObject::TimeZone { offset_seconds, name } => {
-            Ok(build_fixed_timezone(py, *offset_seconds, name.as_deref())?
-                .into_any()
-                .unbind())
-        }
+        MontyObject::TimeZone(tz) => Ok(build_fixed_timezone(py, tz.offset_seconds, tz.name.as_deref())?
+            .into_any()
+            .unbind()),
         MontyObject::Tuple(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> =
                 items.iter().map(|item| monty_to_py(py, item, dc_registry)).collect();
@@ -372,4 +357,32 @@ fn extract_timezone_offset_seconds(tzinfo: &Bound<'_, PyTzInfo>) -> PyResult<i32
     let total_seconds = i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds());
     i32::try_from(total_seconds)
         .map_err(|_| PyTypeError::new_err("Cannot convert timezone offset outside i32 range to Monty value"))
+}
+
+/// Extracts an explicit timezone name if one was provided to `datetime.timezone(...)`.
+///
+/// This uses `timezone.__reduce__()` constructor args to distinguish:
+/// - `timezone(timedelta(...))` -> no explicit name (`None`)
+/// - `timezone(timedelta(...), 'X')` -> explicit custom name (`Some('X')`)
+fn extract_explicit_timezone_name(tzinfo: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let repr = tzinfo.repr()?.extract::<String>()?;
+    if repr == "datetime.timezone.utc" {
+        return Ok(None);
+    }
+    let Some(inner) = repr
+        .strip_prefix("datetime.timezone(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Err(PyTypeError::new_err(
+            "Cannot convert timezone repr to determine explicit name metadata",
+        ));
+    };
+
+    let Some(split_idx) = inner.find("), ") else {
+        return Ok(None);
+    };
+    let name_literal = &inner[split_idx + 3..];
+    let ast = PyModule::import(tzinfo.py(), "ast")?;
+    let name = ast.call_method1("literal_eval", (name_literal,))?;
+    name.extract::<String>().map(Some)
 }

@@ -6,12 +6,12 @@ use crate::{
     args::ArgValues,
     defer_drop,
     exception_private::{ExcType, RunError, RunResult, SimpleException},
-    heap::{Heap, HeapData},
-    intern::Interns,
+    heap::{DropWithHeap, Heap, HeapData},
+    intern::{Interns, StaticStrings, StringId},
     resource::ResourceTracker,
     types::{
-        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, TimeZone, Tuple, date,
-        datetime, str::StringRepr, timedelta,
+        AttrCallResult, Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str,
+        TimeZone, Tuple, date, datetime, str::StringRepr, timedelta,
     },
     value::Value,
 };
@@ -196,6 +196,32 @@ impl Type {
             12 => Some(Self::Iterator),
             13 => Some(Self::Path),
             _ => None,
+        }
+    }
+
+    /// Dispatches classmethod calls on builtin type objects (e.g. `dict.fromkeys`).
+    ///
+    /// Keeps classmethod behavior centralized with type semantics instead of VM call plumbing.
+    pub(crate) fn call_class_method(
+        self,
+        method_id: StringId,
+        args: ArgValues,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> RunResult<AttrCallResult> {
+        match (self, method_id) {
+            (Self::Dict, m) if m == StaticStrings::Fromkeys => {
+                crate::types::dict::dict_fromkeys(args, heap, interns).map(AttrCallResult::Value)
+            }
+            (Self::Bytes, m) if m == StaticStrings::Fromhex => {
+                crate::types::bytes::bytes_fromhex(args, heap, interns).map(AttrCallResult::Value)
+            }
+            (Self::Date, m) if m == StaticStrings::Today => date::class_today(heap, args),
+            (Self::DateTime, m) if m == StaticStrings::Now => datetime::class_now(heap, args, interns),
+            _ => {
+                args.drop_with_heap(heap);
+                Err(ExcType::attribute_error(self, interns.get_str(method_id)))
+            }
         }
     }
 

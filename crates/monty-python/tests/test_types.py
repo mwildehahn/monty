@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 from inline_snapshot import snapshot
 
@@ -137,6 +139,38 @@ def test_tuple_output():
 def test_set_output():
     m = pydantic_monty.Monty('{1, 2, 3}')
     assert m.run() == snapshot({1, 2, 3})
+
+
+# === datetime fixed-offset types ===
+
+
+def test_timezone_roundtrip_preserves_implicit_name_absence():
+    m = pydantic_monty.Monty('x', inputs=['x'])
+    tz = datetime.timezone(datetime.timedelta(hours=1))
+    result = m.run(inputs={'x': tz})
+    assert repr(result) == snapshot('datetime.timezone(datetime.timedelta(seconds=3600))')
+
+
+def test_timezone_roundtrip_preserves_explicit_name():
+    m = pydantic_monty.Monty('x', inputs=['x'])
+    tz = datetime.timezone(datetime.timedelta(hours=1), 'X')
+    result = m.run(inputs={'x': tz})
+    assert repr(result) == snapshot("datetime.timezone(datetime.timedelta(seconds=3600), 'X')")
+
+
+def test_timezone_utc_roundtrip_preserves_singleton():
+    m = pydantic_monty.Monty('x', inputs=['x'])
+    result = m.run(inputs={'x': datetime.timezone.utc})
+    assert result is datetime.timezone.utc
+
+
+def test_datetime_roundtrip_preserves_named_tzinfo():
+    m = pydantic_monty.Monty('x', inputs=['x'])
+    dt = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone(datetime.timedelta(hours=1), 'X'))
+    result = m.run(inputs={'x': dt})
+    assert repr(result) == snapshot(
+        "datetime.datetime(2024, 1, 1, 0, 0, tzinfo=datetime.timezone(datetime.timedelta(seconds=3600), 'X'))"
+    )
 
 
 # === Exception types ===

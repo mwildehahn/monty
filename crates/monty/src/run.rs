@@ -314,12 +314,12 @@ impl<T: ResourceTracker + serde::de::DeserializeOwned> RunProgress<T> {
 /// `datetime.now` callbacks return a primitive payload tuple. The host should not
 /// need to know whether the caller was `date.today()` or `datetime.now(...)`, so we
 /// store that context in the snapshot and apply it when resuming.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum PendingOsTransform {
     /// Build a `datetime.date` from local wall time.
     DateToday,
-    /// Build a `datetime.datetime` using optional fixed offset timezone.
-    DateTimeNow { tz_offset_seconds: Option<i32> },
+    /// Build a `datetime.datetime` using optional fixed-offset timezone metadata.
+    DateTimeNow { tzinfo: Option<TimeZone> },
 }
 
 /// Execution state that can be resumed after an external function call.
@@ -803,23 +803,29 @@ fn decode_datetime_now_transform(args: &[MontyObject]) -> Result<PendingOsTransf
                     "datetime.now(tz=None) internal OS call should include only one mode argument",
                 ));
             }
-            Ok(PendingOsTransform::DateTimeNow {
-                tz_offset_seconds: None,
-            })
+            Ok(PendingOsTransform::DateTimeNow { tzinfo: None })
         }
         2 => {
-            if args.len() != 2 {
+            if !(2..=3).contains(&args.len()) {
                 return Err(MontyException::runtime_error(
-                    "datetime.now(tz=...) internal OS call should include mode and offset",
+                    "datetime.now(tz=...) internal OS call should include mode and offset, optionally followed by a name",
                 ));
             }
             let offset_seconds = args
                 .get(1)
                 .and_then(monty_object_to_i32)
                 .ok_or_else(|| MontyException::runtime_error("datetime.now timezone offset must fit in 32-bit int"))?;
-            Ok(PendingOsTransform::DateTimeNow {
-                tz_offset_seconds: Some(offset_seconds),
-            })
+            let timezone_name = if args.len() == 3 {
+                Some(args.get(2).and_then(monty_object_to_string).ok_or_else(|| {
+                    MontyException::runtime_error("datetime.now timezone name must be a string when provided")
+                })?)
+            } else {
+                None
+            };
+            let tzinfo = TimeZone::new(offset_seconds, timezone_name).map_err(|err| {
+                MontyException::runtime_error(format!("invalid datetime.now timezone arguments: {err:?}"))
+            })?;
+            Ok(PendingOsTransform::DateTimeNow { tzinfo: Some(tzinfo) })
         }
         _ => Err(MontyException::runtime_error(format!(
             "unknown datetime.now internal mode: {mode}"
@@ -845,11 +851,7 @@ fn transform_os_return_value(
             let id = heap.allocate(HeapData::Date(date)).map_err(|e| e.to_string())?;
             Ok(Value::Ref(id))
         }
-        PendingOsTransform::DateTimeNow { tz_offset_seconds } => {
-            let tzinfo = tz_offset_seconds
-                .map(|offset| TimeZone::new(offset, None))
-                .transpose()
-                .map_err(|err| format!("{err:?}"))?;
+        PendingOsTransform::DateTimeNow { tzinfo } => {
             let dt = datetime::from_now_payload(timestamp_utc, local_offset_seconds, tzinfo)
                 .map_err(|err| format!("{err:?}"))?;
             let id = heap.allocate(HeapData::DateTime(dt)).map_err(|e| e.to_string())?;
@@ -894,6 +896,14 @@ fn monty_object_to_i32(obj: &MontyObject) -> Option<i32> {
     match obj {
         MontyObject::Int(v) => i32::try_from(*v).ok(),
         MontyObject::BigInt(v) => v.to_i32(),
+        _ => None,
+    }
+}
+
+/// Converts a `MontyObject` string value to owned `String`.
+fn monty_object_to_string(obj: &MontyObject) -> Option<String> {
+    match obj {
+        MontyObject::String(v) => Some(v.clone()),
         _ => None,
     }
 }

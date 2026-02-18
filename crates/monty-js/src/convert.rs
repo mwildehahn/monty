@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use monty::{DictPairs, ExcType, MontyObject};
+use monty::{DictPairs, ExcType, MontyDate, MontyDateTime, MontyObject, MontyTimeDelta, MontyTimeZone};
 use napi::bindgen_prelude::*;
 use num_bigint::BigInt as NumBigInt;
 
@@ -88,33 +88,21 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
         MontyObject::NamedTuple { values, .. } => create_js_tuple(values, env)?,
         MontyObject::Dict(pairs) => create_js_map(pairs, env)?,
         MontyObject::Set(items) | MontyObject::FrozenSet(items) => create_js_set(items, env)?,
-        MontyObject::Date { year, month, day } => create_js_date(*year, *month, *day, env)?,
-        MontyObject::DateTime {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-            microsecond,
-            offset_seconds,
-        } => create_js_datetime(
-            *year,
-            *month,
-            *day,
-            *hour,
-            *minute,
-            *second,
-            *microsecond,
-            *offset_seconds,
+        MontyObject::Date(date) => create_js_date(date.year, date.month, date.day, env)?,
+        MontyObject::DateTime(datetime) => create_js_datetime(
+            datetime.year,
+            datetime.month,
+            datetime.day,
+            datetime.hour,
+            datetime.minute,
+            datetime.second,
+            datetime.microsecond,
+            datetime.offset_seconds,
+            datetime.timezone_name.clone(),
             env,
         )?,
-        MontyObject::TimeDelta {
-            days,
-            seconds,
-            microseconds,
-        } => create_js_timedelta(*days, *seconds, *microseconds, env)?,
-        MontyObject::TimeZone { offset_seconds, name } => create_js_timezone(*offset_seconds, name.as_deref(), env)?,
+        MontyObject::TimeDelta(delta) => create_js_timedelta(delta.days, delta.seconds, delta.microseconds, env)?,
+        MontyObject::TimeZone(tz) => create_js_timezone(tz.offset_seconds, tz.name.as_deref(), env)?,
         MontyObject::Exception { exc_type, arg } => create_js_exception(*exc_type, arg.as_deref(), env)?,
         MontyObject::Type(t) => create_js_type_marker(&t.to_string(), env)?,
         MontyObject::BuiltinFunction(f) => create_js_builtin_function_marker(&f.to_string(), env)?,
@@ -306,6 +294,7 @@ fn create_js_datetime(
     second: u8,
     microsecond: u32,
     offset_seconds: Option<i32>,
+    timezone_name: Option<String>,
     env: &Env,
 ) -> Result<Unknown<'_>> {
     let mut obj = Object::new(env)?;
@@ -318,6 +307,7 @@ fn create_js_datetime(
     obj.set_named_property("second", u32::from(second))?;
     obj.set_named_property("microsecond", microsecond)?;
     obj.set_named_property("offsetSeconds", offset_seconds)?;
+    obj.set_named_property("timezoneName", timezone_name.as_deref())?;
     obj.into_unknown(env)
 }
 
@@ -684,7 +674,7 @@ fn js_marked_object_to_monty(obj: &Object, monty_type: &str, env: Env) -> Result
                 .map_err(|_| Error::from_reason("Date month out of range for u8 during JS conversion"))?;
             let day = u8::try_from(day)
                 .map_err(|_| Error::from_reason("Date day out of range for u8 during JS conversion"))?;
-            Ok(MontyObject::Date { year, month, day })
+            Ok(MontyObject::Date(MontyDate { year, month, day }))
         }
         "DateTime" => {
             let year: i32 = obj.get_named_property("year")?;
@@ -695,7 +685,8 @@ fn js_marked_object_to_monty(obj: &Object, monty_type: &str, env: Env) -> Result
             let second: u32 = obj.get_named_property("second")?;
             let microsecond: u32 = obj.get_named_property("microsecond")?;
             let offset_seconds: Option<i32> = obj.get_named_property("offsetSeconds")?;
-            Ok(MontyObject::DateTime {
+            let timezone_name: Option<String> = obj.get_named_property("timezoneName")?;
+            Ok(MontyObject::DateTime(MontyDateTime {
                 year,
                 month: u8::try_from(month)
                     .map_err(|_| Error::from_reason("DateTime month out of range for u8 during JS conversion"))?,
@@ -709,22 +700,23 @@ fn js_marked_object_to_monty(obj: &Object, monty_type: &str, env: Env) -> Result
                     .map_err(|_| Error::from_reason("DateTime second out of range for u8 during JS conversion"))?,
                 microsecond,
                 offset_seconds,
-            })
+                timezone_name,
+            }))
         }
         "TimeDelta" => {
             let days: i32 = obj.get_named_property("days")?;
             let seconds: i32 = obj.get_named_property("seconds")?;
             let microseconds: i32 = obj.get_named_property("microseconds")?;
-            Ok(MontyObject::TimeDelta {
+            Ok(MontyObject::TimeDelta(MontyTimeDelta {
                 days,
                 seconds,
                 microseconds,
-            })
+            }))
         }
         "TimeZone" => {
             let offset_seconds: i32 = obj.get_named_property("offsetSeconds")?;
             let name: Option<String> = obj.get_named_property("name")?;
-            Ok(MontyObject::TimeZone { offset_seconds, name })
+            Ok(MontyObject::TimeZone(MontyTimeZone { offset_seconds, name }))
         }
         _ => {
             // Unknown marker type, treat as dict

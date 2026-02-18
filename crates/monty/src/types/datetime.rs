@@ -13,14 +13,14 @@ use chrono::{
 use num_traits::ToPrimitive;
 
 use crate::{
-    args::ArgValues,
+    args::{ArgValues, KwargsValues},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, RunResult, SimpleException},
     heap::{Heap, HeapData, HeapId},
     intern::{Interns, StaticStrings, StringId},
     os::OsFunction,
     resource::{DepthGuard, ResourceError, ResourceTracker},
-    types::{AttrCallResult, PyTrait, TimeDelta, TimeZone, Type, date, timedelta, timezone},
+    types::{AttrCallResult, PyTrait, Str, TimeDelta, TimeZone, Type, date, str::StringRepr, timedelta, timezone},
     value::Value,
 };
 
@@ -28,10 +28,11 @@ const MICROS_PER_SECOND: i64 = 1_000_000;
 const DATE_OUT_OF_RANGE: &str = "date value out of range";
 
 /// `datetime.datetime` storage backed by `chrono::NaiveDateTime` plus optional fixed offset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DateTime {
     naive: NaiveDateTime,
     offset_seconds: Option<i32>,
+    timezone_name: Option<String>,
 }
 
 /// Creates a datetime from civil components and optional fixed offset.
@@ -70,7 +71,10 @@ pub(crate) fn from_components(
     )
     .expect("validated time components must produce a NaiveTime");
 
-    let offset_seconds = tzinfo.map(|tz| tz.offset_seconds);
+    let (offset_seconds, timezone_name) = match tzinfo {
+        Some(tz) => (Some(tz.offset_seconds), tz.name),
+        None => (None, None),
+    };
     if let Some(offset_seconds) = offset_seconds
         && FixedOffset::east_opt(offset_seconds).is_none()
     {
@@ -80,6 +84,7 @@ pub(crate) fn from_components(
     let datetime = DateTime {
         naive: date_value.0.and_time(time),
         offset_seconds,
+        timezone_name,
     };
 
     if let Some(offset_seconds) = offset_seconds {
@@ -112,7 +117,7 @@ pub(crate) fn from_now_payload(
     let utc_micros = rounded_f64_to_i64(micros_f.round());
 
     if let Some(tz) = tzinfo {
-        return from_utc_micros_with_offset(utc_micros, tz.offset_seconds)
+        return from_utc_micros_with_timezone(utc_micros, tz)
             .ok_or_else(|| SimpleException::new_msg(ExcType::OverflowError, DATE_OUT_OF_RANGE).into());
     }
 
@@ -135,6 +140,15 @@ pub(crate) fn is_aware(datetime: &DateTime) -> bool {
 #[must_use]
 pub(crate) fn offset_seconds(datetime: &DateTime) -> Option<i32> {
     datetime.offset_seconds
+}
+
+/// Returns timezone metadata for aware datetimes.
+#[must_use]
+pub(crate) fn timezone_info(datetime: &DateTime) -> Option<TimeZone> {
+    datetime.offset_seconds.map(|offset_seconds| TimeZone {
+        offset_seconds,
+        name: datetime.timezone_name.clone(),
+    })
 }
 
 /// Returns civil components in compact integer widths for object conversion.
@@ -335,9 +349,21 @@ pub(crate) fn class_now(
     }
 
     // Internal-only mode encoding:
-    // 1 => datetime.now(tz=None), 2 => datetime.now(tz=<fixed offset>)
+    // 1 => datetime.now(tz=None), 2 => datetime.now(tz=<fixed offset>[, explicit name])
     let os_args = match tzinfo {
-        Some(tz) => ArgValues::Two(Value::Int(2), Value::Int(i64::from(tz.offset_seconds))),
+        Some(tz) => {
+            let mode = Value::Int(2);
+            let offset = Value::Int(i64::from(tz.offset_seconds));
+            if let Some(name) = tz.name {
+                let name = Value::Ref(heap.allocate(HeapData::Str(Str::new(name)))?);
+                ArgValues::ArgsKargs {
+                    args: vec![mode, offset, name],
+                    kwargs: KwargsValues::Empty,
+                }
+            } else {
+                ArgValues::Two(mode, offset)
+            }
+        }
         None => ArgValues::One(Value::Int(1)),
     };
     Ok(AttrCallResult::OsCall(OsFunction::DateTimeNow, os_args))
@@ -359,7 +385,7 @@ pub(crate) fn py_add(
         let Some(next_utc) = utc.checked_add_signed(chrono_delta) else {
             return Ok(None);
         };
-        from_utc_naive_with_offset(next_utc, offset)
+        from_utc_naive_with_timezone_parts(next_utc, offset, datetime.timezone_name.clone())
     } else {
         let Some(next_local) = datetime.naive.checked_add_signed(chrono_delta) else {
             return Ok(None);
@@ -388,7 +414,7 @@ pub(crate) fn py_sub_timedelta(
         let Some(next_utc) = utc.checked_sub_signed(chrono_delta) else {
             return Ok(None);
         };
-        from_utc_naive_with_offset(next_utc, offset)
+        from_utc_naive_with_timezone_parts(next_utc, offset, datetime.timezone_name.clone())
     } else {
         let Some(next_local) = datetime.naive.checked_sub_signed(chrono_delta) else {
             return Ok(None);
@@ -455,9 +481,9 @@ fn from_local_unix_micros(local_unix_micros: i64) -> Option<DateTime> {
     from_local_naive(datetime.naive_utc())
 }
 
-fn from_utc_micros_with_offset(utc_micros: i64, offset_seconds: i32) -> Option<DateTime> {
+fn from_utc_micros_with_timezone(utc_micros: i64, tzinfo: TimeZone) -> Option<DateTime> {
     let datetime = ChronoDateTime::<Utc>::from_timestamp_micros(utc_micros)?;
-    from_utc_naive_with_offset(datetime.naive_utc(), offset_seconds)
+    from_utc_naive_with_timezone(datetime.naive_utc(), tzinfo)
 }
 
 fn from_local_naive(naive: NaiveDateTime) -> Option<DateTime> {
@@ -467,10 +493,23 @@ fn from_local_naive(naive: NaiveDateTime) -> Option<DateTime> {
     Some(DateTime {
         naive,
         offset_seconds: None,
+        timezone_name: None,
     })
 }
 
 fn from_utc_naive_with_offset(utc_naive: NaiveDateTime, offset_seconds: i32) -> Option<DateTime> {
+    from_utc_naive_with_timezone_parts(utc_naive, offset_seconds, None)
+}
+
+fn from_utc_naive_with_timezone(utc_naive: NaiveDateTime, tzinfo: TimeZone) -> Option<DateTime> {
+    from_utc_naive_with_timezone_parts(utc_naive, tzinfo.offset_seconds, tzinfo.name)
+}
+
+fn from_utc_naive_with_timezone_parts(
+    utc_naive: NaiveDateTime,
+    offset_seconds: i32,
+    timezone_name: Option<String>,
+) -> Option<DateTime> {
     FixedOffset::east_opt(offset_seconds)?;
     let offset_delta = ChronoTimeDelta::try_seconds(i64::from(offset_seconds))?;
     let local = utc_naive.checked_add_signed(offset_delta)?;
@@ -480,6 +519,7 @@ fn from_utc_naive_with_offset(utc_naive: NaiveDateTime, offset_seconds: i32) -> 
     Some(DateTime {
         naive: local,
         offset_seconds: Some(offset_seconds),
+        timezone_name,
     })
 }
 
@@ -570,12 +610,16 @@ impl PyTrait for DateTime {
         if microsecond != 0 {
             write!(f, ", {microsecond}")?;
         }
-        if let Some(offset) = offset_seconds(self) {
-            if offset == 0 {
+        if let Some(tzinfo) = timezone_info(self) {
+            if tzinfo.offset_seconds == 0 && tzinfo.name.is_none() {
                 f.write_str(", tzinfo=datetime.timezone.utc")?;
             } else {
-                let timedelta_repr = timezone::format_offset_timedelta_repr(offset);
-                write!(f, ", tzinfo=datetime.timezone({timedelta_repr})")?;
+                let timedelta_repr = timezone::format_offset_timedelta_repr(tzinfo.offset_seconds);
+                write!(f, ", tzinfo=datetime.timezone({timedelta_repr}")?;
+                if let Some(name) = &tzinfo.name {
+                    write!(f, ", {}", StringRepr(name))?;
+                }
+                f.write_char(')')?;
             }
         }
         f.write_char(')')
@@ -640,8 +684,10 @@ impl PyTrait for DateTime {
         _interns: &Interns,
     ) -> RunResult<Option<AttrCallResult>> {
         if attr_id == StaticStrings::Tzinfo {
-            if let Some(offset) = offset_seconds(self) {
-                let tz = TimeZone::new(offset, None)?;
+            if let Some(tz) = timezone_info(self) {
+                if tz.offset_seconds == 0 && tz.name.is_none() {
+                    return Ok(Some(AttrCallResult::Value(heap.get_timezone_utc()?)));
+                }
                 return Ok(Some(AttrCallResult::Value(Value::Ref(
                     heap.allocate(HeapData::TimeZone(tz))?,
                 ))));
@@ -652,6 +698,6 @@ impl PyTrait for DateTime {
     }
 
     fn py_estimate_size(&self) -> usize {
-        std::mem::size_of::<Self>()
+        std::mem::size_of::<Self>() + self.timezone_name.as_ref().map_or(0, String::len)
     }
 }

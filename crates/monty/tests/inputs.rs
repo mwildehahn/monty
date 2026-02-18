@@ -4,7 +4,7 @@
 //! and can be used in Python code execution.
 
 use indexmap::IndexMap;
-use monty::{ExcType, MontyObject, MontyRun};
+use monty::{ExcType, MontyDate, MontyDateTime, MontyObject, MontyRun, MontyTimeDelta, MontyTimeZone};
 
 // === Immediate Value Tests ===
 
@@ -238,11 +238,11 @@ fn empty_string_input() {
 #[test]
 fn input_date_roundtrip() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let input = MontyObject::Date {
+    let input = MontyObject::Date(MontyDate {
         year: 2024,
         month: 1,
         day: 15,
-    };
+    });
     let result = ex.run_no_limits(vec![input.clone()]).unwrap();
     assert_eq!(result, input);
 }
@@ -250,7 +250,7 @@ fn input_date_roundtrip() {
 #[test]
 fn input_datetime_roundtrip_aware() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let input = MontyObject::DateTime {
+    let input = MontyObject::DateTime(MontyDateTime {
         year: 2024,
         month: 1,
         day: 15,
@@ -259,7 +259,8 @@ fn input_datetime_roundtrip_aware() {
         second: 5,
         microsecond: 7,
         offset_seconds: Some(3_600),
-    };
+        timezone_name: None,
+    });
     let result = ex.run_no_limits(vec![input.clone()]).unwrap();
     assert_eq!(result, input);
 }
@@ -267,11 +268,11 @@ fn input_datetime_roundtrip_aware() {
 #[test]
 fn input_timedelta_roundtrip() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let input = MontyObject::TimeDelta {
+    let input = MontyObject::TimeDelta(MontyTimeDelta {
         days: 1,
         seconds: 2,
         microseconds: 3,
-    };
+    });
     let result = ex.run_no_limits(vec![input.clone()]).unwrap();
     assert_eq!(result, input);
 }
@@ -279,10 +280,10 @@ fn input_timedelta_roundtrip() {
 #[test]
 fn input_timezone_roundtrip() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let input = MontyObject::TimeZone {
+    let input = MontyObject::TimeZone(MontyTimeZone {
         offset_seconds: 3_600,
         name: Some("X".to_string()),
-    };
+    });
     let result = ex.run_no_limits(vec![input.clone()]).unwrap();
     assert_eq!(result, input);
 }
@@ -303,12 +304,12 @@ import datetime
     assert_eq!(
         result,
         MontyObject::Tuple(vec![
-            MontyObject::Date {
+            MontyObject::Date(MontyDate {
                 year: 2024,
                 month: 1,
                 day: 15,
-            },
-            MontyObject::DateTime {
+            }),
+            MontyObject::DateTime(MontyDateTime {
                 year: 2024,
                 month: 1,
                 day: 15,
@@ -317,16 +318,17 @@ import datetime
                 second: 5,
                 microsecond: 7,
                 offset_seconds: Some(61),
-            },
-            MontyObject::TimeDelta {
+                timezone_name: None,
+            }),
+            MontyObject::TimeDelta(MontyTimeDelta {
                 days: 1,
                 seconds: 2,
                 microseconds: 3,
-            },
-            MontyObject::TimeZone {
+            }),
+            MontyObject::TimeZone(MontyTimeZone {
                 offset_seconds: 61,
                 name: Some("N".to_string()),
-            },
+            }),
         ])
     );
 }
@@ -422,18 +424,18 @@ fn invalid_input_repr_nested_in_list() {
 #[test]
 fn invalid_input_date_out_of_range() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let result = ex.run_no_limits(vec![MontyObject::Date {
+    let result = ex.run_no_limits(vec![MontyObject::Date(MontyDate {
         year: 0,
         month: 1,
         day: 1,
-    }]);
+    })]);
     assert!(result.is_err(), "invalid date input should be rejected");
 }
 
 #[test]
 fn invalid_input_datetime_out_of_range() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let result = ex.run_no_limits(vec![MontyObject::DateTime {
+    let result = ex.run_no_limits(vec![MontyObject::DateTime(MontyDateTime {
         year: 2024,
         month: 1,
         day: 15,
@@ -442,28 +444,29 @@ fn invalid_input_datetime_out_of_range() {
         second: 5,
         microsecond: 1_000_000,
         offset_seconds: None,
-    }]);
+        timezone_name: None,
+    })]);
     assert!(result.is_err(), "invalid datetime input should be rejected");
 }
 
 #[test]
 fn invalid_input_timedelta_out_of_range() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let result = ex.run_no_limits(vec![MontyObject::TimeDelta {
+    let result = ex.run_no_limits(vec![MontyObject::TimeDelta(MontyTimeDelta {
         days: 1_000_000_000,
         seconds: 0,
         microseconds: 0,
-    }]);
+    })]);
     assert!(result.is_err(), "invalid timedelta input should be rejected");
 }
 
 #[test]
 fn invalid_input_timezone_out_of_range() {
     let ex = MontyRun::new("x".to_owned(), "test.py", vec!["x".to_owned()], vec![]).unwrap();
-    let result = ex.run_no_limits(vec![MontyObject::TimeZone {
+    let result = ex.run_no_limits(vec![MontyObject::TimeZone(MontyTimeZone {
         offset_seconds: 86_400,
         name: None,
-    }]);
+    })]);
     assert!(result.is_err(), "invalid timezone input should be rejected");
 }
 

@@ -116,6 +116,9 @@ impl TimeZone {
             ));
         };
         let name = name.unwrap_or(None);
+        if offset_seconds == 0 && name.is_none() {
+            return heap.get_timezone_utc().map_err(Into::into);
+        }
 
         let tz = Self::new(offset_seconds, name)?;
         Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))

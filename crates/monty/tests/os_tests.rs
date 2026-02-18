@@ -4,7 +4,10 @@
 //! `RunProgress::OsCall` with the correct `OsFunction` variant and arguments,
 //! and that return values are correctly used by Python code.
 
-use monty::{ExcType, MontyObject, MontyRun, NoLimitTracker, OsFunction, PrintWriter, RunProgress, file_stat};
+use monty::{
+    ExcType, MontyDate, MontyDateTime, MontyObject, MontyRun, NoLimitTracker, OsFunction, PrintWriter, RunProgress,
+    file_stat,
+};
 
 /// Helper to run code and extract the OsCall progress.
 ///
@@ -392,7 +395,7 @@ datetime.datetime.now(datetime.timezone.utc)
     assert!(args.is_empty(), "datetime.now OS callback should expose no args");
     assert_eq!(
         result,
-        MontyObject::DateTime {
+        MontyObject::DateTime(MontyDateTime {
             year: 2023,
             month: 11,
             day: 14,
@@ -401,7 +404,8 @@ datetime.datetime.now(datetime.timezone.utc)
             second: 20,
             microsecond: 0,
             offset_seconds: Some(0),
-        }
+            timezone_name: None,
+        })
     );
 }
 
@@ -420,11 +424,11 @@ datetime.date.today()
     assert!(args.is_empty(), "date.today OS callback should expose no args");
     assert_eq!(
         result,
-        MontyObject::Date {
+        MontyObject::Date(MontyDate {
             year: 2023,
             month: 11,
             day: 14,
-        }
+        })
     );
 }
 
@@ -473,11 +477,11 @@ fn date_today_resume_payload_survives_snapshot_roundtrip() {
     let output = resumed.into_complete().expect("expected completion");
     assert_eq!(
         output,
-        MontyObject::Date {
+        MontyObject::Date(MontyDate {
             year: 2023,
             month: 11,
             day: 14,
-        }
+        })
     );
 }
 

@@ -11,17 +11,11 @@ use crate::{
     builtins::{Builtins, BuiltinsFunctions},
     defer_drop,
     exception_private::{ExcType, RunError},
-    heap::{DropWithHeap, Heap, HeapData, HeapGuard, HeapId},
-    intern::{ExtFunctionId, FunctionId, Interns, StaticStrings, StringId},
+    heap::{DropWithHeap, HeapData, HeapGuard, HeapId},
+    intern::{ExtFunctionId, FunctionId, StringId},
     os::OsFunction,
     resource::ResourceTracker,
-    types::{
-        AttrCallResult, Dict, PyTrait, Type,
-        bytes::{bytes_fromhex, call_bytes_method},
-        date, datetime,
-        dict::dict_fromkeys,
-        str::call_str_method,
-    },
+    types::{AttrCallResult, Dict, PyTrait, Type, bytes::call_bytes_method, str::call_str_method},
     value::{EitherStr, Value},
 };
 
@@ -287,7 +281,8 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             }
             Value::Builtin(Builtins::Type(t)) => {
                 // Handle classmethods on type objects like dict.fromkeys()
-                call_type_method(t, name_id, args, this.heap, this.interns).map(Into::into)
+                t.call_class_method(name_id, args, this.heap, this.interns)
+                    .map(Into::into)
             }
             _ => {
                 // Non-heap values without method support
@@ -785,31 +780,4 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
 
         Ok(CallResult::FramePushed)
     }
-}
-
-/// Dispatches a classmethod call on a type object.
-///
-/// Handles classmethods like `dict.fromkeys()` and `bytes.fromhex()` that are
-/// called on the type itself rather than on an instance.
-fn call_type_method(
-    t: Type,
-    method_id: StringId,
-    args: ArgValues,
-    heap: &mut Heap<impl ResourceTracker>,
-    interns: &Interns,
-) -> Result<AttrCallResult, RunError> {
-    match (t, method_id) {
-        (Type::Dict, m) if m == StaticStrings::Fromkeys => {
-            return dict_fromkeys(args, heap, interns).map(AttrCallResult::Value);
-        }
-        (Type::Bytes, m) if m == StaticStrings::Fromhex => {
-            return bytes_fromhex(args, heap, interns).map(AttrCallResult::Value);
-        }
-        (Type::Date, m) if m == StaticStrings::Today => return date::class_today(heap, args),
-        (Type::DateTime, m) if m == StaticStrings::Now => return datetime::class_now(heap, args, interns),
-        _ => {}
-    }
-    // Other types or unknown methods - report actual type name, not 'type'
-    args.drop_with_heap(heap);
-    Err(ExcType::attribute_error(t, interns.get_str(method_id)))
 }
