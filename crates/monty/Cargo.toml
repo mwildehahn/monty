@@ -32,8 +32,7 @@ num-integer = { workspace = true }
 smallvec = { version = "1.13", features = ["serde"] }
 fancy-regex = "0.17.0"
 itertools = "0.14.0"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
-speedate = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 
 [features]
 # ref-count-return changes behavior to return information on reference counts to check they're correct
