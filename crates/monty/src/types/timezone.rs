@@ -296,11 +296,7 @@ impl PyTrait for TimeZone {
         Ok(())
     }
 
-    fn py_str(
-        &self,
-        _heap: &Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Cow<'static, str> {
+    fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> Cow<'static, str> {
         if let Some(name) = &self.name {
             return Cow::Owned(name.clone());
         }

@@ -71,12 +71,7 @@ fn run_oscall_with_result(code: &str, mock_result: MontyObject) -> (OsFunction, 
 
 /// Helper that resumes `datetime.now()` with an invalid payload and asserts the runtime error.
 fn assert_datetime_now_payload_error(mock_result: MontyObject, expected_message: &str) {
-    let runner = MontyRun::new(
-        "import datetime\ndatetime.datetime.now()".to_owned(),
-        "test.py",
-        vec![],
-    )
-    .unwrap();
+    let runner = MontyRun::new("import datetime\ndatetime.datetime.now()".to_owned(), "test.py", vec![]).unwrap();
     let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
     let RunProgress::OsCall(call) = progress else {
         panic!("expected OsCall");
@@ -430,12 +425,7 @@ datetime.date.today()
 
 #[test]
 fn date_today_resume_payload_survives_snapshot_roundtrip() {
-    let runner = MontyRun::new(
-        "import datetime\ndatetime.date.today()".to_owned(),
-        "test.py",
-        vec![],
-    )
-    .unwrap();
+    let runner = MontyRun::new("import datetime\ndatetime.date.today()".to_owned(), "test.py", vec![]).unwrap();
     let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
     let bytes = progress.dump().unwrap();
     // Consume and resume the original snapshot so ref-count-panic mode does not

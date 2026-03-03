@@ -219,11 +219,7 @@ impl PyTrait for Date {
         write!(f, "datetime.date({year}, {month}, {day})")
     }
 
-    fn py_str(
-        &self,
-        _heap: &Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> std::borrow::Cow<'static, str> {
+    fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> std::borrow::Cow<'static, str> {
         let (year, month, day) = to_ymd(*self);
         std::borrow::Cow::Owned(format!("{year:04}-{month:02}-{day:02}"))
     }

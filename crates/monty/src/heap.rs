@@ -261,10 +261,9 @@ impl HeapData {
             Self::ReMatch(m) => HeapDataMut::ReMatch(m),
             Self::RePattern(p) => HeapDataMut::RePattern(p),
             Self::ExtFunction(s) => HeapDataMut::ExtFunction(s),
-            Self::Date(_)
-            | Self::DateTime(_)
-            | Self::TimeDelta(_)
-            | Self::TimeZone(_) => panic!("to_mut not implemented for datetime types"),
+            Self::Date(_) | Self::DateTime(_) | Self::TimeDelta(_) | Self::TimeZone(_) => {
+                panic!("to_mut not implemented for datetime types")
+            }
         }
     }
 
@@ -398,6 +397,17 @@ impl HeapData {
             Self::LongInt(li) => Some(li.hash()),
         }
     }
+}
+
+/// Computes a stable hash for immutable heap leaf types.
+///
+/// Includes the outer heap variant discriminant to avoid cross-type collisions
+/// between different heap variants that might contain similar fields.
+fn hash_immutable_leaf<T: Hash>(data: &HeapData, value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    discriminant(data).hash(&mut hasher);
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Manual implementation of AbstractValue dispatch for HeapData.
@@ -1401,6 +1411,22 @@ impl<T: ResourceTracker> Heap<T> {
             HashState::Unhashable => return Ok(None),
             HashState::Cached(hash) => return Ok(Some(hash)),
             HashState::Unknown => {}
+        }
+
+        // Hash immutable datetime leaf types directly. They don't implement
+        // `HeapDataMut`, so they must bypass the lazy mutable hash path.
+        if let Some(data) = &entry.data {
+            let leaf_hash = match data {
+                HeapData::Date(date) => Some(hash_immutable_leaf(data, date)),
+                HeapData::DateTime(datetime) => Some(hash_immutable_leaf(data, datetime)),
+                HeapData::TimeDelta(delta) => Some(hash_immutable_leaf(data, delta)),
+                HeapData::TimeZone(tz) => Some(hash_immutable_leaf(data, tz)),
+                _ => None,
+            };
+            if let Some(hash) = leaf_hash {
+                entry.hash_state = HashState::Cached(hash);
+                return Ok(Some(hash));
+            }
         }
 
         // Handle Cell specially - uses identity-based hashing (like Python cell objects)

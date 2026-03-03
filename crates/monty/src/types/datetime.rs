@@ -100,7 +100,6 @@ pub(crate) fn from_components(
 }
 
 /// Creates a datetime from callback payload.
-#[expect(dead_code)]
 pub(crate) fn from_now_payload(
     timestamp_utc: f64,
     local_offset_seconds: i32,
@@ -623,11 +622,7 @@ impl PyTrait for DateTime {
         f.write_char(')')
     }
 
-    fn py_str(
-        &self,
-        _heap: &Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> Cow<'static, str> {
+    fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> Cow<'static, str> {
         let Some((year, month, day, hour, minute, second, microsecond)) = to_components(self) else {
             return Cow::Borrowed("<out of range>");
         };

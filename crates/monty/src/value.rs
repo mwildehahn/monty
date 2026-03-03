@@ -1637,6 +1637,54 @@ impl Value {
     ) -> RunResult<AttrCallResult> {
         match self {
             Self::Ref(heap_id) => {
+                // Datetime leaf types are immutable and don't implement HeapDataMut.
+                // Route attribute lookup through cloned values to avoid `with_entry_mut`.
+                enum DateTimeAttr {
+                    Found(AttrCallResult),
+                    Missing,
+                    NotDateTimeLeaf,
+                }
+
+                let datetime_attr = match heap.get(*heap_id) {
+                    HeapData::Date(date) => {
+                        let date = *date;
+                        match date.py_getattr(attr, heap, interns)? {
+                            Some(call_result) => DateTimeAttr::Found(call_result),
+                            None => DateTimeAttr::Missing,
+                        }
+                    }
+                    HeapData::DateTime(datetime) => {
+                        let datetime = datetime.clone();
+                        match datetime.py_getattr(attr, heap, interns)? {
+                            Some(call_result) => DateTimeAttr::Found(call_result),
+                            None => DateTimeAttr::Missing,
+                        }
+                    }
+                    HeapData::TimeDelta(delta) => {
+                        let delta = *delta;
+                        match delta.py_getattr(attr, heap, interns)? {
+                            Some(call_result) => DateTimeAttr::Found(call_result),
+                            None => DateTimeAttr::Missing,
+                        }
+                    }
+                    HeapData::TimeZone(tz) => {
+                        let tz = tz.clone();
+                        match tz.py_getattr(attr, heap, interns)? {
+                            Some(call_result) => DateTimeAttr::Found(call_result),
+                            None => DateTimeAttr::Missing,
+                        }
+                    }
+                    _ => DateTimeAttr::NotDateTimeLeaf,
+                };
+                match datetime_attr {
+                    DateTimeAttr::Found(call_result) => return Ok(call_result),
+                    DateTimeAttr::Missing => {
+                        let type_name = self.py_type(heap);
+                        return Err(ExcType::attribute_error(type_name, attr.as_str(interns)));
+                    }
+                    DateTimeAttr::NotDateTimeLeaf => {}
+                }
+
                 // Use with_entry_mut to get access to both data and heap without borrow conflicts.
                 // This allows py_getattr to allocate (for computed attributes) while we hold the data.
                 let opt_result = heap.with_entry_mut(*heap_id, |heap, data| data.py_getattr(attr, heap, interns))?;

@@ -297,11 +297,7 @@ impl PyTrait for TimeDelta {
         f.write_char(')')
     }
 
-    fn py_str(
-        &self,
-        _heap: &Heap<impl ResourceTracker>,
-        _interns: &Interns,
-    ) -> std::borrow::Cow<'static, str> {
+    fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> std::borrow::Cow<'static, str> {
         let (days, seconds, microseconds) = components(self);
         let hours = seconds / 3600;
         let minutes = (seconds % 3600) / 60;

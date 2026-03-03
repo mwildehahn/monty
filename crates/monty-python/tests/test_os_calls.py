@@ -290,7 +290,7 @@ def test_datetime_now_yields_oscall():
     m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
     result = m.start()
 
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
     assert result.is_os_function is True
     assert result.function_name == snapshot('datetime.now')
     assert result.args == snapshot(())
@@ -301,7 +301,7 @@ def test_datetime_now_resume_returns_native_datetime():
     code = 'import datetime; datetime.datetime.now(datetime.timezone.utc)'
     m = pydantic_monty.Monty(code)
     result = m.start()
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
 
     resumed = result.resume(return_value=(1_700_000_000.0, 0))
     assert isinstance(resumed, pydantic_monty.MontyComplete)
@@ -316,7 +316,7 @@ base = datetime.datetime.now(datetime.timezone.utc)
 """
     m = pydantic_monty.Monty(code)
     result = m.start()
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
     resumed = result.resume(return_value=(1_700_000_000.0, 0))
     assert isinstance(resumed, pydantic_monty.MontyComplete)
     assert resumed.output == snapshot(datetime.timedelta(hours=2))
@@ -325,7 +325,7 @@ base = datetime.datetime.now(datetime.timezone.utc)
 def test_date_today_resume_returns_native_date():
     m = pydantic_monty.Monty('import datetime; datetime.date.today()')
     result = m.start()
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
     assert result.function_name == snapshot('datetime.now')
     resumed = result.resume(return_value=(1_700_000_000.0, 0))
     assert isinstance(resumed, pydantic_monty.MontyComplete)
@@ -342,7 +342,7 @@ def test_date_today_resume_returns_native_date():
 def test_datetime_now_resume_rejects_invalid_payload_shape(return_value: Any, expected: Any):
     m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
     result = m.start()
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
     with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
         result.resume(return_value=return_value)
     assert str(exc_info.value) == expected
@@ -372,7 +372,7 @@ def test_datetime_now_resume_rejects_invalid_payload_shape(return_value: Any, ex
 def test_datetime_now_resume_rejects_invalid_payload_types(return_value: Any, expected: Any):
     m = pydantic_monty.Monty('import datetime; datetime.datetime.now()')
     result = m.start()
-    assert isinstance(result, pydantic_monty.MontySnapshot)
+    assert isinstance(result, pydantic_monty.FunctionSnapshot)
     with pytest.raises(pydantic_monty.MontyRuntimeError) as exc_info:
         result.resume(return_value=return_value)
     assert str(exc_info.value) == expected

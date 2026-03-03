@@ -17,11 +17,7 @@ use crate::{
     intern::{FunctionId, StringId},
     os::OsFunction,
     resource::ResourceTracker,
-    types::{
-        AttrCallResult, Dict, PyTrait, Type,
-        bytes::call_bytes_method,
-        str::call_str_method,
-    },
+    types::{AttrCallResult, Dict, PyTrait, Type, bytes::call_bytes_method, str::call_str_method},
     value::{EitherStr, Value},
 };
 
@@ -55,7 +51,6 @@ pub(super) enum CallResult {
     /// The VM will push the value onto the stack and execute `exec_get_awaitable`.
     AwaitValue(Value),
 }
-
 impl From<AttrCallResult> for CallResult {
     fn from(result: AttrCallResult) -> Self {
         match result {
@@ -296,8 +291,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             }
             Value::Builtin(Builtins::Type(t)) => {
                 // Handle classmethods on type objects like dict.fromkeys()
-                t.call_class_method(name_id, args, this)
-                    .map(Into::into)
+                t.call_class_method(name_id, args, this).map(Into::into)
             }
             _ => {
                 // Non-heap values without method support
@@ -800,4 +794,3 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         Ok(CallResult::FramePushed)
     }
 }
-

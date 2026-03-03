@@ -24,7 +24,10 @@ use crate::{
     parse::{parse, parse_with_interner},
     prepare::{prepare, prepare_with_existing_names},
     resource::ResourceTracker,
-    run_progress::{ExtFunctionResult, NameLookupResult},
+    run_progress::{
+        DateTimeNowResumeMode, ExtFunctionResult, NameLookupResult, convert_datetime_now_callback_result,
+        decode_datetime_now_internal_args,
+    },
     value::Value,
 };
 
@@ -648,6 +651,10 @@ pub struct ReplOsCall<T: ResourceTracker> {
     pub kwargs: Vec<(MontyObject, MontyObject)>,
     /// Unique identifier for this call (used for async correlation).
     pub call_id: u32,
+    /// Hidden mode metadata for `OsFunction::DateTimeNow`.
+    ///
+    /// Keeps host-visible args empty while preserving resume conversion context.
+    datetime_now_mode: Option<DateTimeNowResumeMode>,
     /// Internal REPL execution snapshot.
     snapshot: ReplSnapshot<T>,
 }
@@ -659,7 +666,24 @@ impl<T: ResourceTracker> ReplOsCall<T> {
         result: impl Into<ExtFunctionResult>,
         print: &mut PrintWriter<'_>,
     ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
-        self.snapshot.run(result, print)
+        let Self {
+            datetime_now_mode,
+            snapshot,
+            ..
+        } = self;
+        let ext_result = result.into();
+        let ext_result = if let Some(mode) = datetime_now_mode.as_ref() {
+            match ext_result {
+                ExtFunctionResult::Return(obj) => match convert_datetime_now_callback_result(mode, obj) {
+                    Ok(obj) => ExtFunctionResult::Return(obj),
+                    Err(error) => return Err(snapshot.cleanup_and_error(error, print)),
+                },
+                other => other,
+            }
+        } else {
+            ext_result
+        };
+        snapshot.run(ext_result, print)
     }
 }
 
@@ -946,6 +970,27 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
 
         handle_repl_vm_result(vm_result, vm_state, executor, repl)
     }
+
+    /// Restores the VM snapshot solely to perform mandatory cleanup, then returns a REPL error.
+    ///
+    /// Used when host payload validation fails before `VM::resume` can run.
+    fn cleanup_and_error(self, error: MontyException, print: &mut PrintWriter<'_>) -> Box<ReplStartError<T>> {
+        let Self {
+            mut repl,
+            executor,
+            vm_state,
+        } = self;
+        let mut vm = VM::restore(
+            vm_state,
+            &executor.module_code,
+            &mut repl.heap,
+            &mut repl.namespaces,
+            &executor.interns,
+            print,
+        );
+        vm.cleanup();
+        Box::new(ReplStartError { repl, error })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,12 +1050,26 @@ fn handle_repl_vm_result<T: ResourceTracker>(
             call_id,
         }) => {
             let (args_py, kwargs_py) = args.into_py_objects(&mut repl.heap, &executor.interns);
+            let datetime_now_mode = if function == OsFunction::DateTimeNow {
+                match decode_datetime_now_internal_args(&args_py, &kwargs_py) {
+                    Ok(mode) => Some(mode),
+                    Err(error) => return Err(Box::new(ReplStartError { repl, error })),
+                }
+            } else {
+                None
+            };
+            let (public_args, public_kwargs) = if datetime_now_mode.is_some() {
+                (vec![], vec![])
+            } else {
+                (args_py, kwargs_py)
+            };
 
             Ok(ReplProgress::OsCall(ReplOsCall {
                 function,
-                args: args_py,
-                kwargs: kwargs_py,
+                args: public_args,
+                kwargs: public_kwargs,
                 call_id: call_id.raw(),
+                datetime_now_mode,
                 snapshot: new_repl_snapshot!(),
             }))
         }
