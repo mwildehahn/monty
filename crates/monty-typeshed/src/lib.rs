@@ -53,4 +53,27 @@ mod tests {
         // VERSIONS file should contain module version info like "builtins: 3.0-"
         assert!(versions_content.contains("builtins:"));
     }
+
+    #[test]
+    fn custom_datetime_stub_is_packaged() {
+        let mut typeshed_zip_archive = zip::ZipArchive::new(io::Cursor::new(TYPESHED_ZIP_BYTES)).unwrap();
+
+        let mut datetime_stub = typeshed_zip_archive.by_name("stdlib/datetime.pyi").unwrap();
+        assert!(datetime_stub.is_file());
+
+        let mut datetime_content = String::new();
+        datetime_stub.read_to_string(&mut datetime_content).unwrap();
+        assert!(datetime_content.contains("class datetime(date):"));
+    }
+
+    #[test]
+    fn versions_include_custom_datetime_module() {
+        let mut typeshed_zip_archive = zip::ZipArchive::new(io::Cursor::new(TYPESHED_ZIP_BYTES)).unwrap();
+
+        let mut versions_file = typeshed_zip_archive.by_name("stdlib/VERSIONS").unwrap();
+        let mut versions_content = String::new();
+        versions_file.read_to_string(&mut versions_content).unwrap();
+
+        assert!(versions_content.contains("datetime: 3.0-"));
+    }
 }
