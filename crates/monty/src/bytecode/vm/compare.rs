@@ -60,9 +60,17 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             {
                 return Err(ExcType::datetime_compare_naive_aware_error());
             }
-            let lhs_type = lhs.py_type(this.heap);
-            let rhs_type = rhs.py_type(this.heap);
-            return Err(ExcType::ordering_type_error(op, lhs_type, rhs_type));
+            if matches!(
+                (lhs, rhs),
+                (Value::Float(_) | Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
+            ) {
+                // If float comparisons return None, it's due to NaN, where ordered comparisons yield False.
+                false
+            } else {
+                let lhs_type = lhs.py_type(this.heap);
+                let rhs_type = rhs.py_type(this.heap);
+                return Err(ExcType::ordering_type_error(op, lhs_type, rhs_type));
+            }
         };
         this.push(Value::Bool(result));
         Ok(())

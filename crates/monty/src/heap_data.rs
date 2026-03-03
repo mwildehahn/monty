@@ -18,7 +18,7 @@ use crate::{
     intern::{FunctionId, Interns},
     types::{
         AttrCallResult, Bytes, Dataclass, Dict, FrozenSet, List, LongInt, Module, MontyIter, NamedTuple, Path, PyTrait,
-        Range, ReMatch, RePattern, Set, Slice, Str, Tuple, Type,
+        Range, ReMatch, RePattern, Set, Slice, Str, Tuple, Type, date, datetime, timedelta, timezone,
     },
     value::{EitherStr, Value},
 };
@@ -111,6 +111,10 @@ pub(crate) enum HeapDataMut<'a> {
     /// does not match any interned string (e.g., the host returns a function
     /// with a different `__name__` than the variable it was assigned to).
     ExtFunction(&'a mut String),
+    Date(&'a mut date::Date),
+    DateTime(&'a mut datetime::DateTime),
+    TimeDelta(&'a mut timedelta::TimeDelta),
+    TimeZone(&'a mut timezone::TimeZone),
 }
 
 /// Thin wrapper around `Value` which is used in the `Cell` variant above.
@@ -304,6 +308,10 @@ impl PyTrait for HeapDataMut<'_> {
             Self::Path(p) => p.py_type(heap),
             Self::ReMatch(m) => m.py_type(heap),
             Self::RePattern(p) => p.py_type(heap),
+            Self::Date(d) => d.py_type(heap),
+            Self::DateTime(d) => d.py_type(heap),
+            Self::TimeDelta(d) => d.py_type(heap),
+            Self::TimeZone(d) => d.py_type(heap),
         }
     }
 
@@ -342,6 +350,10 @@ impl PyTrait for HeapDataMut<'_> {
             Self::ReMatch(m) => m.py_estimate_size(),
             Self::RePattern(p) => p.py_estimate_size(),
             Self::ExtFunction(s) => std::mem::size_of::<String>() + s.len(),
+            Self::Date(d) => d.py_estimate_size(),
+            Self::DateTime(d) => d.py_estimate_size(),
+            Self::TimeDelta(d) => d.py_estimate_size(),
+            Self::TimeZone(d) => d.py_estimate_size(),
         }
     }
 
@@ -494,6 +506,10 @@ impl PyTrait for HeapDataMut<'_> {
             Self::Path(p) => p.py_bool(heap, interns),
             Self::ReMatch(m) => m.py_bool(heap, interns),
             Self::RePattern(p) => p.py_bool(heap, interns),
+            Self::Date(d) => d.py_bool(heap, interns),
+            Self::DateTime(d) => d.py_bool(heap, interns),
+            Self::TimeDelta(d) => d.py_bool(heap, interns),
+            Self::TimeZone(d) => d.py_bool(heap, interns),
         }
     }
 
@@ -534,6 +550,10 @@ impl PyTrait for HeapDataMut<'_> {
             Self::ReMatch(m) => m.py_repr_fmt(f, heap, heap_ids, interns),
             Self::RePattern(p) => p.py_repr_fmt(f, heap, heap_ids, interns),
             Self::ExtFunction(name) => write!(f, "<function '{name}' external>"),
+            Self::Date(d) => d.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::DateTime(d) => d.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::TimeDelta(d) => d.py_repr_fmt(f, heap, heap_ids, interns),
+            Self::TimeZone(d) => d.py_repr_fmt(f, heap, heap_ids, interns),
         }
     }
 

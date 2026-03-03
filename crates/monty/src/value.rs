@@ -294,7 +294,7 @@ impl PyTrait for Value {
             (Self::Ref(id1), Self::Ref(id2)) => match (heap.get(*id1), heap.get(*id2)) {
                 (HeapData::LongInt(a), HeapData::LongInt(b)) => Ok(a.inner().partial_cmp(b.inner())),
                 (HeapData::Str(a), HeapData::Str(b)) => Ok(a.as_str().partial_cmp(b.as_str())),
-                _ => Ok(None),
+                _ => heap.with_two(*id1, *id2, |heap, left, right| left.py_cmp(right, heap, interns)),
             },
             // Interned string comparisons
             (Self::InternString(s1), Self::InternString(s2)) => {

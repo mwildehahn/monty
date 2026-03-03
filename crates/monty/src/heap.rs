@@ -261,9 +261,10 @@ impl HeapData {
             Self::ReMatch(m) => HeapDataMut::ReMatch(m),
             Self::RePattern(p) => HeapDataMut::RePattern(p),
             Self::ExtFunction(s) => HeapDataMut::ExtFunction(s),
-            Self::Date(_) | Self::DateTime(_) | Self::TimeDelta(_) | Self::TimeZone(_) => {
-                panic!("to_mut not implemented for datetime types")
-            }
+            Self::Date(d) => HeapDataMut::Date(d),
+            Self::DateTime(dt) => HeapDataMut::DateTime(dt),
+            Self::TimeDelta(td) => HeapDataMut::TimeDelta(td),
+            Self::TimeZone(tz) => HeapDataMut::TimeZone(tz),
         }
     }
 
