@@ -212,14 +212,18 @@ fn format_timedelta_repr(delta: &TimeDelta) -> String {
     repr
 }
 
-/// Formats an offset in seconds as `+HH:MM` or `+HH:MM:SS` (and negative variants).
+const SECONDS_PER_HOUR: i32 = 3_600;
+const SECONDS_PER_MINUTE: i32 = 60;
+const MICROSECONDS_PER_SECOND: i128 = 1_000_000;
+
+/// Formats a generic offset as `+HH:MM` or `+HH:MM:SS`.
 #[must_use]
 pub(crate) fn format_offset_hms(offset_seconds: i32) -> String {
     let sign = if offset_seconds >= 0 { '+' } else { '-' };
     let abs = offset_seconds.abs();
-    let hours = abs / 3600;
-    let minutes = (abs % 3600) / 60;
-    let seconds = abs % 60;
+    let hours = abs / SECONDS_PER_HOUR;
+    let minutes = (abs % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
+    let seconds = abs % SECONDS_PER_MINUTE;
     if seconds == 0 {
         return format!("{sign}{hours:02}:{minutes:02}");
     }
@@ -229,7 +233,7 @@ pub(crate) fn format_offset_hms(offset_seconds: i32) -> String {
 /// Formats a canonical `datetime.timedelta(...)` repr for a fixed offset in seconds.
 #[must_use]
 pub(crate) fn format_offset_timedelta_repr(offset_seconds: i32) -> String {
-    let delta = timedelta::from_total_microseconds(i128::from(offset_seconds) * 1_000_000)
+    let delta = timedelta::from_total_microseconds(i128::from(offset_seconds) * MICROSECONDS_PER_SECOND)
         .expect("timezone offset range is always representable as timedelta");
     format_timedelta_repr(&delta)
 }

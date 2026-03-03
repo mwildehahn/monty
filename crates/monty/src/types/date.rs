@@ -20,6 +20,8 @@ use crate::{
     value::Value,
 };
 
+const MICROSECONDS_PER_DAY: i128 = 86_400_000_000;
+
 /// `datetime.date` storage backed by `chrono::NaiveDate`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Date(pub(crate) NaiveDate);
@@ -237,7 +239,7 @@ impl PyTrait for Date {
     fn py_sub(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> Result<Option<Value>, ResourceError> {
         // `date - date` returns timedelta days difference.
         let diff_days = i64::from(to_ordinal(*self)) - i64::from(to_ordinal(*other));
-        let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
+        let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * MICROSECONDS_PER_DAY) else {
             return Ok(None);
         };
         Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))
@@ -296,7 +298,7 @@ pub(crate) fn py_sub_date(
     heap: &mut Heap<impl ResourceTracker>,
 ) -> Result<Option<Value>, ResourceError> {
     let diff_days = i64::from(to_ordinal(date)) - i64::from(to_ordinal(other));
-    let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * 86_400_000_000) else {
+    let Ok(delta) = timedelta::from_total_microseconds(i128::from(diff_days) * MICROSECONDS_PER_DAY) else {
         return Ok(None);
     };
     Ok(Some(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?)))

@@ -55,7 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_datetime_stub_is_packaged() {
+    fn datetime_stub_is_packaged() {
         let mut typeshed_zip_archive = zip::ZipArchive::new(io::Cursor::new(TYPESHED_ZIP_BYTES)).unwrap();
 
         let mut datetime_stub = typeshed_zip_archive.by_name("stdlib/datetime.pyi").unwrap();
@@ -67,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn versions_include_custom_datetime_module() {
+    fn versions_include_datetime_module() {
         let mut typeshed_zip_archive = zip::ZipArchive::new(io::Cursor::new(TYPESHED_ZIP_BYTES)).unwrap();
 
         let mut versions_file = typeshed_zip_archive.by_name("stdlib/VERSIONS").unwrap();

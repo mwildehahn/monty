@@ -25,8 +25,14 @@ pub(crate) const MIN_TIMEDELTA_DAYS: i32 = -999_999_999;
 /// Maximum allowed day magnitude for `timedelta`.
 pub(crate) const MAX_TIMEDELTA_DAYS: i32 = 999_999_999;
 
-const DAY_SECONDS: i128 = 86_400;
-const DAY_MICROSECONDS: i128 = DAY_SECONDS * 1_000_000;
+const DAY_SECONDS: i32 = 86_400;
+const SECONDS_PER_HOUR: i32 = 3_600;
+const SECONDS_PER_MINUTE: i32 = 60;
+const MICROSECONDS_PER_SECOND: i128 = 1_000_000;
+const MILLISECONDS_PER_SECOND: i128 = 1_000;
+const DAY_MICROSECONDS: i128 = (DAY_SECONDS as i128) * MICROSECONDS_PER_SECOND;
+const HOUR_MICROSECONDS: i128 = (SECONDS_PER_HOUR as i128) * MICROSECONDS_PER_SECOND;
+const MINUTE_MICROSECONDS: i128 = (SECONDS_PER_MINUTE as i128) * MICROSECONDS_PER_SECOND;
 
 /// `datetime.timedelta` storage backed by `chrono::TimeDelta`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
@@ -41,11 +47,13 @@ pub(crate) fn new(days: i32, seconds: i32, microseconds: i32) -> RunResult<TimeD
         )
         .into());
     }
-    if !(0..86_400).contains(&seconds) || !(0..1_000_000).contains(&microseconds) {
+    if !(0..DAY_SECONDS).contains(&seconds)
+        || !(0..i32::try_from(MICROSECONDS_PER_SECOND).unwrap()).contains(&microseconds)
+    {
         return Err(SimpleException::new_msg(ExcType::ValueError, "timedelta normalized fields out of range").into());
     }
     let total_microseconds =
-        i128::from(days) * DAY_MICROSECONDS + i128::from(seconds) * 1_000_000 + i128::from(microseconds);
+        i128::from(days) * DAY_MICROSECONDS + i128::from(seconds) * MICROSECONDS_PER_SECOND + i128::from(microseconds);
     from_total_microseconds(total_microseconds)
 }
 
@@ -55,8 +63,8 @@ pub(crate) fn components(delta: &TimeDelta) -> (i32, i32, i32) {
     let total_microseconds = total_microseconds(delta);
     let days = total_microseconds.div_euclid(DAY_MICROSECONDS);
     let rem = total_microseconds.rem_euclid(DAY_MICROSECONDS);
-    let seconds = rem / 1_000_000;
-    let micros = rem % 1_000_000;
+    let seconds = rem / MICROSECONDS_PER_SECOND;
+    let micros = rem % MICROSECONDS_PER_SECOND;
     (
         i32::try_from(days).expect("chrono day range fits CPython i32 day bounds"),
         i32::try_from(seconds).expect("seconds are bounded by one day"),
@@ -70,14 +78,15 @@ pub(crate) fn total_microseconds(delta: &TimeDelta) -> i128 {
     // `subsec_nanos` can be negative for negative durations; summing both parts
     // yields an exact signed duration as long as we keep microsecond precision.
     let seconds = i128::from(delta.0.num_seconds());
-    let microseconds = i128::from(delta.0.subsec_nanos() / 1_000);
-    seconds * 1_000_000 + microseconds
+    let microseconds =
+        i128::from(delta.0.subsec_nanos() / i32::try_from(MILLISECONDS_PER_SECOND).expect("1000 fits in i32"));
+    seconds * MICROSECONDS_PER_SECOND + microseconds
 }
 
 /// Returns the duration as total whole seconds plus fractional microseconds.
 #[must_use]
 pub(crate) fn total_seconds(delta: &TimeDelta) -> f64 {
-    total_microseconds(delta) as f64 / 1_000_000.0
+    total_microseconds(delta) as f64 / (MICROSECONDS_PER_SECOND as f64)
 }
 
 /// Returns total seconds only when exact (no microseconds), otherwise `None`.
@@ -85,7 +94,7 @@ pub(crate) fn total_seconds(delta: &TimeDelta) -> f64 {
 pub(crate) fn exact_total_seconds(delta: &TimeDelta) -> Option<i128> {
     let (days, seconds, microseconds) = components(delta);
     if microseconds == 0 {
-        Some(i128::from(days) * DAY_SECONDS + i128::from(seconds))
+        Some(i128::from(days) * i128::from(DAY_SECONDS) + i128::from(seconds))
     } else {
         None
     }
@@ -99,7 +108,10 @@ pub(crate) fn chrono_delta(delta: &TimeDelta) -> ChronoTimeDelta {
 
 /// Converts a chrono duration to Monty's bounded timedelta.
 pub(crate) fn from_chrono(delta: ChronoTimeDelta) -> RunResult<TimeDelta> {
-    from_total_microseconds(i128::from(delta.num_seconds()) * 1_000_000 + i128::from(delta.subsec_nanos() / 1_000))
+    from_total_microseconds(
+        i128::from(delta.num_seconds()) * MICROSECONDS_PER_SECOND
+            + i128::from(delta.subsec_nanos() / i32::try_from(MILLISECONDS_PER_SECOND).expect("1000 fits in i32")),
+    )
 }
 
 /// Builds a normalized timedelta from an arbitrary microsecond count.
@@ -113,13 +125,13 @@ pub(crate) fn from_total_microseconds(total_microseconds: i128) -> RunResult<Tim
         .into());
     }
 
-    let seconds = total_microseconds.div_euclid(1_000_000);
-    let micros = total_microseconds.rem_euclid(1_000_000);
+    let seconds = total_microseconds.div_euclid(MICROSECONDS_PER_SECOND);
+    let micros = total_microseconds.rem_euclid(MICROSECONDS_PER_SECOND);
 
     let seconds = i64::try_from(seconds)
         .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range"))?;
-    let nanos =
-        u32::try_from(micros * 1_000).expect("microsecond remainder is in 0..1_000_000 and fits u32 nanoseconds");
+    let nanos = u32::try_from(micros * MILLISECONDS_PER_SECOND)
+        .expect("microsecond remainder is in 0..1_000_000 and fits u32 nanoseconds");
 
     let delta = ChronoTimeDelta::new(seconds, nanos)
         .ok_or_else(|| SimpleException::new_msg(ExcType::OverflowError, "timedelta value out of range"))?;
@@ -208,10 +220,10 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
 
     let total_microseconds = checked_component(weeks, 7 * DAY_MICROSECONDS)?
         + checked_component(days, DAY_MICROSECONDS)?
-        + checked_component(hours, 3_600_000_000)?
-        + checked_component(minutes, 60_000_000)?
-        + checked_component(seconds, 1_000_000)?
-        + checked_component(milliseconds, 1_000)?
+        + checked_component(hours, HOUR_MICROSECONDS)?
+        + checked_component(minutes, MINUTE_MICROSECONDS)?
+        + checked_component(seconds, MICROSECONDS_PER_SECOND)?
+        + checked_component(milliseconds, MILLISECONDS_PER_SECOND)?
         + microseconds;
 
     let delta = from_total_microseconds(total_microseconds)?;
@@ -299,9 +311,9 @@ impl PyTrait for TimeDelta {
 
     fn py_str(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> std::borrow::Cow<'static, str> {
         let (days, seconds, microseconds) = components(self);
-        let hours = seconds / 3600;
-        let minutes = (seconds % 3600) / 60;
-        let second = seconds % 60;
+        let hours = seconds / SECONDS_PER_HOUR;
+        let minutes = (seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
+        let second = seconds % SECONDS_PER_MINUTE;
         let time = if microseconds == 0 {
             format!("{hours}:{minutes:02}:{second:02}")
         } else {

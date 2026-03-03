@@ -367,6 +367,9 @@ fn build_fixed_timezone<'py>(
     Ok(timezone.cast_into()?)
 }
 
+/// Number of seconds in a standard 24-hour day.
+const SECONDS_PER_DAY: i64 = 86_400;
+
 /// Extracts fixed offset seconds from a `datetime.timezone` instance.
 ///
 /// Uses `datetime` C-API accessors via PyO3 wrappers to avoid float-based
@@ -381,7 +384,7 @@ fn extract_timezone_offset_seconds(tzinfo: &Bound<'_, PyTzInfo>) -> PyResult<i32
             "Cannot convert timezone offset with fractional seconds to Monty value",
         ));
     }
-    let total_seconds = i64::from(delta.get_days()) * 86_400 + i64::from(delta.get_seconds());
+    let total_seconds = i64::from(delta.get_days()) * SECONDS_PER_DAY + i64::from(delta.get_seconds());
     i32::try_from(total_seconds)
         .map_err(|_| PyTypeError::new_err("Cannot convert timezone offset outside i32 range to Monty value"))
 }

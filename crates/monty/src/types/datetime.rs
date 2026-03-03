@@ -24,15 +24,30 @@ use crate::{
     value::Value,
 };
 
+/// Number of microseconds in a single second.
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const DATE_OUT_OF_RANGE: &str = "date value out of range";
 
 /// `datetime.datetime` storage backed by `chrono::NaiveDateTime` plus optional fixed offset.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DateTime {
     naive: NaiveDateTime,
     offset_seconds: Option<i32>,
     timezone_name: Option<String>,
+}
+
+impl std::hash::Hash for DateTime {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash must be consistent with equality (py_eq).
+        if is_aware(self) {
+            // Aware datetimes compare equal if they represent the same UTC instant,
+            // regardless of their local offset or timezone name.
+            let _ = utc_micros(self).inspect(|m| m.hash(state));
+        } else {
+            // Naive datetimes compare equal if they have the same local fields.
+            local_micros(self).hash(state);
+        }
+    }
 }
 
 /// Creates a datetime from civil components and optional fixed offset.
@@ -110,7 +125,7 @@ pub(crate) fn from_now_payload(
             SimpleException::new_msg(ExcType::TypeError, "datetime.now payload timestamp must be finite").into(),
         );
     }
-    let micros_f = timestamp_utc * 1_000_000.0;
+    let micros_f = timestamp_utc * (MICROS_PER_SECOND as f64);
     if micros_f < i64::MIN as f64 || micros_f > i64::MAX as f64 {
         return Err(SimpleException::new_msg(ExcType::OverflowError, "timestamp out of range").into());
     }

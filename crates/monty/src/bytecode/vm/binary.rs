@@ -313,6 +313,7 @@ fn timedelta_overflow_error(
     rhs: &crate::types::TimeDelta,
     add: bool,
 ) -> Option<RunError> {
+    /// Number of microseconds in a standard 24-hour day.
     const DAY_MICROSECONDS: i128 = 86_400_000_000;
 
     let lhs_micros = timedelta::total_microseconds(lhs);

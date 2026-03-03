@@ -119,6 +119,8 @@ COPY_FILES = [
     # all of pathlib dir
     'pathlib/__init__.pyi',
     'pathlib/types.pyi',
+    # ==============================
+    'datetime.pyi',
 ]
 # content for typeshed's `VERSIONS` file
 VERSIONS = """\
