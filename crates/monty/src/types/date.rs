@@ -6,7 +6,7 @@
 use std::fmt::Write;
 
 use ahash::AHashSet;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate};
 
 use crate::{
     args::ArgValues,
@@ -68,19 +68,6 @@ pub(crate) fn to_ordinal(date: Date) -> i32 {
 #[must_use]
 pub(crate) fn to_ymd(date: Date) -> (i32, u32, u32) {
     (date.0.year(), date.0.month(), date.0.day())
-}
-
-/// Creates a date from local wall-clock microseconds since Unix epoch.
-#[expect(dead_code)]
-pub(crate) fn from_local_unix_micros(local_unix_micros: i64) -> RunResult<Date> {
-    let Some(datetime) = DateTime::<Utc>::from_timestamp_micros(local_unix_micros) else {
-        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
-    };
-    let date = datetime.date_naive();
-    if !(1..=9999).contains(&date.year()) {
-        return Err(SimpleException::new_msg(ExcType::OverflowError, "date value out of range").into());
-    }
-    Ok(Date(date))
 }
 
 /// Constructor for `date(year, month, day)`.

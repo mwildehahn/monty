@@ -27,7 +27,7 @@ use crate::{
     types::{
         AttrCallResult, Bytes, Dataclass, Date, DateTime, Dict, FrozenSet, List, LongInt, Module, MontyIter,
         NamedTuple, Path, PyTrait, Range, ReMatch, RePattern, Set, Slice, Str, TimeDelta, TimeZone, Tuple, Type,
-        allocate_tuple, date, datetime, timedelta,
+        allocate_tuple,
     },
     value::{EitherStr, Value},
 };
@@ -265,137 +265,6 @@ impl HeapData {
             Self::DateTime(dt) => HeapDataMut::DateTime(dt),
             Self::TimeDelta(td) => HeapDataMut::TimeDelta(td),
             Self::TimeZone(tz) => HeapDataMut::TimeZone(tz),
-        }
-    }
-
-    /// Computes hash for immutable heap types that can be used as dict keys.
-    ///
-    /// Returns Some(hash) for immutable types (Str, Bytes, Tuple of hashables).
-    /// Returns None for mutable types (List, Dict) which cannot be dict keys.
-    ///
-    /// This is called lazily when the value is first used as a dict key,
-    /// avoiding unnecessary hash computation for values that are never used as keys.
-    #[expect(dead_code)]
-    fn compute_hash_if_immutable(&self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> Option<u64> {
-        match self {
-            // Hash just the actual string or bytes content for consistency with Value::InternString/InternBytes
-            // hence we don't include the discriminant
-            Self::Str(s) => {
-                let mut hasher = DefaultHasher::new();
-                s.as_str().hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Bytes(b) => {
-                let mut hasher = DefaultHasher::new();
-                b.as_slice().hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::FrozenSet(fs) => {
-                // FrozenSet hash is XOR of element hashes (order-independent)
-                fs.compute_hash(heap, interns).ok().flatten()
-            }
-            Self::Tuple(t) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                // Tuple is hashable only if all elements are hashable
-                for obj in t.as_slice() {
-                    let h = obj.py_hash(heap, interns).ok()??;
-                    h.hash(&mut hasher);
-                }
-                Some(hasher.finish())
-            }
-            Self::NamedTuple(nt) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                // Hash only by elements (not type_name) to match equality semantics
-                for obj in nt.as_vec() {
-                    let h = obj.py_hash(heap, interns).ok()??;
-                    h.hash(&mut hasher);
-                }
-                Some(hasher.finish())
-            }
-            Self::Closure(closure) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                // TODO, this is NOT proper hashing, we should somehow hash the function properly
-                closure.func_id.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::FunctionDefaults(fd) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                // TODO, this is NOT proper hashing, we should somehow hash the function properly
-                fd.func_id.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Range(range) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                range.start.hash(&mut hasher);
-                range.stop.hash(&mut hasher);
-                range.step.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::Date(date) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                date::to_ordinal(*date).hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::DateTime(dt) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                if datetime::is_aware(dt) {
-                    datetime::utc_micros(dt).hash(&mut hasher);
-                } else {
-                    datetime::local_micros(dt).hash(&mut hasher);
-                }
-                Some(hasher.finish())
-            }
-            Self::TimeDelta(delta) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                timedelta::total_microseconds(delta).hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            Self::TimeZone(tz) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                tz.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            // Dataclass hashability depends on the mutable flag
-            Self::Dataclass(dc) => dc.compute_hash(heap, interns).ok().flatten(),
-            // Slices are immutable and hashable (like in CPython)
-            Self::Slice(slice) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                slice.start.hash(&mut hasher);
-                slice.stop.hash(&mut hasher);
-                slice.step.hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            // Path is immutable and hashable
-            Self::Path(path) => {
-                let mut hasher = DefaultHasher::new();
-                discriminant(self).hash(&mut hasher);
-                path.as_str().hash(&mut hasher);
-                Some(hasher.finish())
-            }
-            // Mutable types, exceptions, iterators, modules, and async types cannot be hashed
-            // (Cell is handled specially in get_or_compute_hash)
-            Self::List(_)
-            | Self::Dict(_)
-            | Self::Set(_)
-            | Self::Cell(_)
-            | Self::Exception(_)
-            | Self::Iter(_)
-            | Self::Module(_)
-            | Self::Coroutine(_)
-            | Self::GatherFuture(_)
-            | Self::ExtFunction(_) => None,
-            // LongInt is immutable and hashable
-            Self::LongInt(li) => Some(li.hash()),
         }
     }
 }
