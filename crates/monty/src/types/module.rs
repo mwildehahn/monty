@@ -161,7 +161,10 @@ impl Module {
                 func.drop_with_heap(args_guard.heap());
                 Err(ExcType::type_error("module attribute is not callable"))
             }
-            None => Err(ExcType::attribute_error_module(interns.get_str(self.name), attr.as_str(interns))),
+            None => Err(ExcType::attribute_error_module(
+                interns.get_str(self.name),
+                attr.as_str(interns),
+            )),
         }
     }
 }
