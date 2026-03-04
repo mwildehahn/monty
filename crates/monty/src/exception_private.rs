@@ -934,6 +934,7 @@ impl ExcType {
     ///
     /// Matches CPython's format:
     /// `'{op}' not supported between instances of '{left}' and '{right}'`
+    #[expect(dead_code, reason = "kept for deferred datetime ordering parity follow-up")]
     #[must_use]
     pub(crate) fn ordering_type_error(op: &str, lhs_type: Type, rhs_type: Type) -> RunError {
         SimpleException::new_msg(
@@ -947,6 +948,7 @@ impl ExcType {
     ///
     /// Matches CPython's message for `datetime - datetime` when one operand is naive
     /// and the other is aware.
+    #[expect(dead_code, reason = "kept for deferred datetime subtraction parity follow-up")]
     #[must_use]
     pub(crate) fn datetime_subtract_naive_aware_error() -> RunError {
         SimpleException::new_msg(
@@ -960,6 +962,7 @@ impl ExcType {
     ///
     /// Matches CPython's message for `<`, `<=`, `>`, `>=` when one datetime is naive
     /// and the other is aware.
+    #[expect(dead_code, reason = "kept for deferred datetime ordering parity follow-up")]
     #[must_use]
     pub(crate) fn datetime_compare_naive_aware_error() -> RunError {
         SimpleException::new_msg(Self::TypeError, "can't compare offset-naive and offset-aware datetimes").into()

@@ -18,7 +18,7 @@ use crate::{
     heap_data::HeapDataMut,
     intern::FunctionId,
     resource::ResourceTracker,
-    types::{List, OsCallMetadata, PyTrait},
+    types::{List, PyTrait},
     value::Value,
 };
 
@@ -938,14 +938,6 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
     /// Note: The args are empty because the host already has them from the
     /// `FunctionCall` return value. We only need to track the creator task.
     pub fn add_pending_call(&mut self, call_id: CallId) {
-        self.add_pending_call_with_metadata(call_id, None);
-    }
-
-    /// Adds pending call data with optional call metadata.
-    ///
-    /// Metadata is interpreted by host-facing resume layers during future
-    /// resolution. Scheduler logic treats it as opaque.
-    pub fn add_pending_call_with_metadata(&mut self, call_id: CallId, metadata: Option<OsCallMetadata>) {
         let scheduler = self.get_or_create_scheduler();
         let current_task = scheduler.current_task_id().unwrap_or_default();
         scheduler.add_pending_call(
@@ -953,16 +945,8 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             PendingCallData {
                 args: ArgValues::Empty,
                 creator_task: current_task,
-                os_call_metadata: metadata,
             },
         );
-    }
-
-    /// Retrieves optional metadata for a pending call.
-    pub fn get_pending_call_metadata(&self, call_id: CallId) -> Option<OsCallMetadata> {
-        self.scheduler
-            .as_ref()
-            .and_then(|s| s.get_pending_call_metadata(call_id))
     }
 
     /// Prepares the current task to continue after futures are resolved.

@@ -1,10 +1,9 @@
 //! Comparison operation helpers for the VM.
 
-use super::{VM, datetime_awareness};
+use super::VM;
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
-    heap::HeapData,
     resource::ResourceTracker,
     types::{LongInt, PyTrait},
     value::Value,
@@ -40,7 +39,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
     }
 
     /// Ordering comparison with a predicate.
-    pub(super) fn compare_ord<F>(&mut self, op: &'static str, check: F) -> Result<(), RunError>
+    pub(super) fn compare_ord<F>(&mut self, check: F) -> Result<(), RunError>
     where
         F: FnOnce(std::cmp::Ordering) -> bool,
     {
@@ -51,33 +50,7 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
         let lhs = this.pop();
         defer_drop!(lhs, this);
 
-        let cmp = lhs.py_cmp(rhs, this.heap, this.interns)?;
-        let result = if let Some(ordering) = cmp {
-            check(ordering)
-        } else {
-            if let (Some(lhs_aware), Some(rhs_aware)) =
-                (datetime_awareness(lhs, this.heap), datetime_awareness(rhs, this.heap))
-                && lhs_aware != rhs_aware
-            {
-                return Err(ExcType::datetime_compare_naive_aware_error());
-            }
-            let float_nan_ordering = match (lhs, rhs) {
-                (Value::Float(_), Value::Float(_) | Value::Int(_) | Value::Bool(_) | Value::InternLongInt(_))
-                | (Value::Int(_) | Value::Bool(_) | Value::InternLongInt(_), Value::Float(_)) => true,
-                (Value::Float(_), Value::Ref(id)) | (Value::Ref(id), Value::Float(_)) => {
-                    matches!(this.heap.get(*id), HeapData::LongInt(_))
-                }
-                _ => false,
-            };
-            if float_nan_ordering {
-                // If float comparisons return None, it's due to NaN, where ordered comparisons yield False.
-                false
-            } else {
-                let lhs_type = lhs.py_type(this.heap);
-                let rhs_type = rhs.py_type(this.heap);
-                return Err(ExcType::ordering_type_error(op, lhs_type, rhs_type));
-            }
-        };
+        let result = lhs.py_cmp(rhs, this.heap, this.interns)?.is_some_and(check);
         this.push(Value::Bool(result));
         Ok(())
     }

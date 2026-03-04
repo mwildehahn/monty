@@ -33,7 +33,7 @@ use crate::{
     os::OsFunction,
     parse::CodeRange,
     resource::ResourceTracker,
-    types::{LongInt, MontyIter, PyTrait, iter::advance_on_heap, timedelta},
+    types::{LongInt, MontyIter, PyTrait, iter::advance_on_heap},
     value::{BitwiseOp, EitherStr, Value},
 };
 
@@ -117,19 +117,6 @@ macro_rules! fetch_u16 {
         $cached_frame.ip += 2;
         u16::from_le_bytes([lo, hi])
     }};
-}
-
-/// Returns datetime awareness (`true` for aware, `false` for naive) for datetime values.
-///
-/// Returns `None` when the value is not a datetime reference.
-fn datetime_awareness(value: &Value, heap: &Heap<impl ResourceTracker>) -> Option<bool> {
-    let Value::Ref(id) = value else {
-        return None;
-    };
-    match heap.get(*id) {
-        HeapData::DateTime(dt) => Some(crate::types::datetime::is_aware(dt)),
-        _ => None,
-    }
 }
 
 /// Fetches an i16 operand (little-endian) using cached code/ip.
@@ -989,10 +976,10 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                 // Comparison Operations
                 Opcode::CompareEq => try_catch_sync!(self, cached_frame, self.compare_eq()),
                 Opcode::CompareNe => try_catch_sync!(self, cached_frame, self.compare_ne()),
-                Opcode::CompareLt => try_catch_sync!(self, cached_frame, self.compare_ord("<", Ordering::is_lt)),
-                Opcode::CompareLe => try_catch_sync!(self, cached_frame, self.compare_ord("<=", Ordering::is_le)),
-                Opcode::CompareGt => try_catch_sync!(self, cached_frame, self.compare_ord(">", Ordering::is_gt)),
-                Opcode::CompareGe => try_catch_sync!(self, cached_frame, self.compare_ord(">=", Ordering::is_ge)),
+                Opcode::CompareLt => try_catch_sync!(self, cached_frame, self.compare_ord(Ordering::is_lt)),
+                Opcode::CompareLe => try_catch_sync!(self, cached_frame, self.compare_ord(Ordering::is_le)),
+                Opcode::CompareGt => try_catch_sync!(self, cached_frame, self.compare_ord(Ordering::is_gt)),
+                Opcode::CompareGe => try_catch_sync!(self, cached_frame, self.compare_ord(Ordering::is_ge)),
                 Opcode::CompareIs => self.compare_is(false),
                 Opcode::CompareIsNot => self.compare_is(true),
                 Opcode::CompareIn => try_catch_sync!(self, cached_frame, self.compare_in(false)),
@@ -1035,16 +1022,6 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
                                 match negated.into_value(self.heap) {
                                     Ok(v) => self.push(v),
                                     Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
-                                }
-                            } else if let HeapData::TimeDelta(delta) = self.heap.get(id) {
-                                let delta_total_microseconds = timedelta::total_microseconds(delta);
-                                value.drop_with_heap(self.heap);
-                                match timedelta::from_total_microseconds(-delta_total_microseconds) {
-                                    Ok(negated) => match self.heap.allocate(HeapData::TimeDelta(negated)) {
-                                        Ok(id) => self.push(Value::Ref(id)),
-                                        Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
-                                    },
-                                    Err(e) => catch_sync!(self, cached_frame, e),
                                 }
                             } else {
                                 let value_type = value.py_type(self.heap);
@@ -1614,14 +1591,6 @@ impl<'a, 'p, T: ResourceTracker> VM<'a, 'p, T> {
         let value = obj
             .to_value(self.heap, self.interns)
             .map_err(|e| SimpleException::new(ExcType::RuntimeError, Some(format!("invalid return type: {e}"))))?;
-        self.resume_value(value)
-    }
-
-    /// Resumes execution with a pre-built runtime value.
-    ///
-    /// This is used by snapshot resume paths that need to post-process host return
-    /// values before pushing them back into the VM stack.
-    pub fn resume_value(&mut self, value: Value) -> Result<FrameExit, RunError> {
         self.push(value);
         self.run()
     }

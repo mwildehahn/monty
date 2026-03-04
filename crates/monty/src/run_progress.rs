@@ -6,7 +6,7 @@
 //! The internal [`Snapshot`] type is `pub(crate)` — callers interact exclusively with
 //! the per-variant structs.
 
-use std::mem;
+use std::{collections::BTreeMap, mem};
 
 use crate::{
     ExcType, MontyException,
@@ -394,6 +394,7 @@ impl<T: ResourceTracker> NameLookup<T> {
             self.snapshot.executor,
             self.snapshot.heap,
             self.snapshot.namespaces,
+            self.snapshot.pending_call_metadata,
         )
     }
 }
@@ -422,6 +423,8 @@ pub struct ResolveFutures<T: ResourceTracker> {
     namespaces: Namespaces,
     /// The pending call_ids that this snapshot is waiting on.
     pending_call_ids: Vec<u32>,
+    /// Metadata keyed by pending call ID for async OS-call result conversion.
+    pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 }
 
 impl<T: ResourceTracker> ResolveFutures<T> {
@@ -432,6 +435,7 @@ impl<T: ResourceTracker> ResolveFutures<T> {
         heap: Heap<T>,
         namespaces: Namespaces,
         pending_call_ids: Vec<u32>,
+        pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
     ) -> Self {
         Self {
             executor,
@@ -439,6 +443,7 @@ impl<T: ResourceTracker> ResolveFutures<T> {
             heap,
             namespaces,
             pending_call_ids,
+            pending_call_metadata,
         }
     }
 
@@ -474,6 +479,7 @@ impl<T: ResourceTracker> ResolveFutures<T> {
             mut heap,
             mut namespaces,
             pending_call_ids,
+            mut pending_call_metadata,
         } = self;
 
         // Validate that all provided call_ids are in the pending set before restoring VM.
@@ -505,7 +511,7 @@ impl<T: ResourceTracker> ResolveFutures<T> {
         for (call_id, ext_result) in results {
             match ext_result {
                 ExtFunctionResult::Return(obj) => {
-                    let obj = if let Some(metadata) = vm.get_pending_call_metadata(CallId::new(call_id)) {
+                    let obj = if let Some(metadata) = pending_call_metadata.remove(&call_id) {
                         match convert_os_call_result(&metadata, obj) {
                             Ok(obj) => obj,
                             Err(error) => {
@@ -527,9 +533,13 @@ impl<T: ResourceTracker> ResolveFutures<T> {
                         )));
                     }
                 }
-                ExtFunctionResult::Error(exc) => vm.fail_future(call_id, exc.into()),
+                ExtFunctionResult::Error(exc) => {
+                    pending_call_metadata.remove(&call_id);
+                    vm.fail_future(call_id, exc.into());
+                }
                 ExtFunctionResult::Future(_) => {}
                 ExtFunctionResult::NotFound(function_name) => {
+                    pending_call_metadata.remove(&call_id);
                     vm.fail_future(call_id, ExtFunctionResult::not_found_exc(&function_name));
                 }
             }
@@ -568,13 +578,14 @@ impl<T: ResourceTracker> ResolveFutures<T> {
                     heap,
                     namespaces,
                     pending_call_ids,
+                    pending_call_metadata,
                 }));
             }
         }
 
         let result = vm.run();
         let vm_state = vm.check_snapshot(&result);
-        handle_vm_result(result, vm_state, executor, heap, namespaces)
+        handle_vm_result(result, vm_state, executor, heap, namespaces, pending_call_metadata)
     }
 }
 
@@ -598,6 +609,8 @@ pub(crate) struct Snapshot<T: ResourceTracker> {
     pub(crate) heap: Heap<T>,
     /// The namespaces containing all variable bindings.
     pub(crate) namespaces: Namespaces,
+    /// Metadata keyed by pending call ID for async OS-call result conversion.
+    pub(crate) pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 }
 
 impl<T: ResourceTracker> Snapshot<T> {
@@ -621,6 +634,7 @@ impl<T: ResourceTracker> Snapshot<T> {
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
         let ext_result = result.into();
+        let mut all_pending_call_metadata = self.pending_call_metadata;
 
         let mut vm = VM::restore(
             self.vm_state,
@@ -637,10 +651,9 @@ impl<T: ResourceTracker> Snapshot<T> {
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
                 if let Some(metadata) = pending_call_metadata {
-                    vm.add_pending_call_with_metadata(call_id, Some(metadata));
-                } else {
-                    vm.add_pending_call(call_id);
+                    all_pending_call_metadata.insert(raw_call_id, metadata);
                 }
+                vm.add_pending_call(call_id);
                 vm.push(Value::ExternalFuture(call_id));
                 vm.run()
             }
@@ -650,7 +663,14 @@ impl<T: ResourceTracker> Snapshot<T> {
         };
 
         let vm_state = vm.check_snapshot(&vm_result);
-        handle_vm_result(vm_result, vm_state, self.executor, self.heap, self.namespaces)
+        handle_vm_result(
+            vm_result,
+            vm_state,
+            self.executor,
+            self.heap,
+            self.namespaces,
+            all_pending_call_metadata,
+        )
     }
 
     /// Restores the VM snapshot solely to perform mandatory cleanup, then returns an error.
@@ -668,6 +688,7 @@ impl<T: ResourceTracker> Snapshot<T> {
             vm_state,
             mut heap,
             mut namespaces,
+            pending_call_metadata: _,
         } = self;
         let mut vm = VM::restore(
             vm_state,
@@ -758,6 +779,7 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
     executor: Executor,
     mut heap: Heap<T>,
     mut namespaces: Namespaces,
+    pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 ) -> Result<RunProgress<T>, MontyException> {
     macro_rules! new_snapshot {
         () => {
@@ -766,6 +788,7 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
                 vm_state: vm_state.expect("snapshot should exist"),
                 heap,
                 namespaces,
+                pending_call_metadata,
             }
         };
     }
@@ -853,6 +876,7 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
                 heap,
                 namespaces,
                 pending_call_ids,
+                pending_call_metadata,
             )))
         }
         Ok(FrameExit::NameLookup {

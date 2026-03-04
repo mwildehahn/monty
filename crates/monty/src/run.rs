@@ -158,7 +158,14 @@ impl MontyRun {
         let vm_state = vm.check_snapshot(&vm_result);
 
         // Handle the result using the destructured parts
-        handle_vm_result(vm_result, vm_state, executor, heap, namespaces)
+        handle_vm_result(
+            vm_result,
+            vm_state,
+            executor,
+            heap,
+            namespaces,
+            std::collections::BTreeMap::new(),
+        )
     }
 }
 

@@ -4,7 +4,7 @@
 //! is compiled and executed against persistent heap/namespace state without
 //! replaying previously executed snippets.
 
-use std::mem;
+use std::{collections::BTreeMap, mem};
 
 use ahash::AHashMap;
 use ruff_python_ast::token::TokenKind;
@@ -365,7 +365,7 @@ impl<T: ResourceTracker> MontyRepl<T> {
             (vm_result, vm_state)
         };
 
-        handle_repl_vm_result(vm_result, vm_state, executor, this)
+        handle_repl_vm_result(vm_result, vm_state, executor, this, BTreeMap::new())
     }
 
     /// Starts snippet execution with `PrintWriter::Stdout` and no additional host output wiring.
@@ -732,6 +732,7 @@ impl<T: ResourceTracker> ReplNameLookup<T> {
             mut repl,
             executor,
             vm_state,
+            pending_call_metadata,
         } = snapshot;
 
         // Resolve the name lookup result BEFORE restoring the VM, since the VM
@@ -782,7 +783,7 @@ impl<T: ResourceTracker> ReplNameLookup<T> {
             vm.resume_with_exception(err)
         };
         let vm_state = vm.check_snapshot(&vm_result);
-        handle_repl_vm_result(vm_result, vm_state, executor, repl)
+        handle_repl_vm_result(vm_result, vm_state, executor, repl, pending_call_metadata)
     }
 }
 
@@ -804,6 +805,8 @@ pub struct ReplResolveFutures<T: ResourceTracker> {
     vm_state: VMSnapshot,
     /// Pending call IDs expected by this snapshot.
     pending_call_ids: Vec<u32>,
+    /// Metadata keyed by pending call ID for async OS-call result conversion.
+    pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 }
 
 impl<T: ResourceTracker> ReplResolveFutures<T> {
@@ -831,6 +834,7 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
             executor,
             vm_state,
             pending_call_ids,
+            mut pending_call_metadata,
         } = self;
 
         let invalid_call_id = results
@@ -858,7 +862,7 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
         for (call_id, ext_result) in results {
             match ext_result {
                 ExtFunctionResult::Return(obj) => {
-                    let obj = if let Some(metadata) = vm.get_pending_call_metadata(CallId::new(call_id)) {
+                    let obj = if let Some(metadata) = pending_call_metadata.remove(&call_id) {
                         match convert_os_call_result(&metadata, obj) {
                             Ok(obj) => obj,
                             Err(error) => {
@@ -876,9 +880,13 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
                         return Err(Box::new(ReplStartError { repl, error }));
                     }
                 }
-                ExtFunctionResult::Error(exc) => vm.fail_future(call_id, RunError::from(exc)),
+                ExtFunctionResult::Error(exc) => {
+                    pending_call_metadata.remove(&call_id);
+                    vm.fail_future(call_id, RunError::from(exc));
+                }
                 ExtFunctionResult::Future(_) => {}
                 ExtFunctionResult::NotFound(function_name) => {
+                    pending_call_metadata.remove(&call_id);
                     vm.fail_future(call_id, ExtFunctionResult::not_found_exc(&function_name));
                 }
             }
@@ -911,6 +919,7 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
                     executor,
                     vm_state,
                     pending_call_ids,
+                    pending_call_metadata,
                 }));
             }
         }
@@ -918,7 +927,7 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
         let vm_result = vm.run();
         let vm_state = vm.check_snapshot(&vm_result);
 
-        handle_repl_vm_result(vm_result, vm_state, executor, repl)
+        handle_repl_vm_result(vm_result, vm_state, executor, repl, pending_call_metadata)
     }
 }
 
@@ -939,6 +948,8 @@ pub(crate) struct ReplSnapshot<T: ResourceTracker> {
     executor: ReplExecutor,
     /// VM stack/frame state at suspension.
     vm_state: VMSnapshot,
+    /// Metadata keyed by pending call ID for async OS-call result conversion.
+    pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 }
 
 impl<T: ResourceTracker> ReplSnapshot<T> {
@@ -965,6 +976,7 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
             mut repl,
             executor,
             vm_state,
+            pending_call_metadata: mut all_pending_call_metadata,
         } = self;
 
         let ext_result = result.into();
@@ -984,10 +996,9 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
                 if let Some(metadata) = pending_call_metadata {
-                    vm.add_pending_call_with_metadata(call_id, Some(metadata));
-                } else {
-                    vm.add_pending_call(call_id);
+                    all_pending_call_metadata.insert(raw_call_id, metadata);
                 }
+                vm.add_pending_call(call_id);
                 vm.push(Value::ExternalFuture(call_id));
                 vm.run()
             }
@@ -998,7 +1009,7 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
 
         let vm_state = vm.check_snapshot(&vm_result);
 
-        handle_repl_vm_result(vm_result, vm_state, executor, repl)
+        handle_repl_vm_result(vm_result, vm_state, executor, repl, all_pending_call_metadata)
     }
 
     /// Restores the VM snapshot solely to perform mandatory cleanup, then returns a REPL error.
@@ -1009,6 +1020,7 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
             mut repl,
             executor,
             vm_state,
+            pending_call_metadata: _,
         } = self;
         let mut vm = VM::restore(
             vm_state,
@@ -1037,6 +1049,7 @@ fn handle_repl_vm_result<T: ResourceTracker>(
     vm_state: Option<VMSnapshot>,
     executor: ReplExecutor,
     mut repl: MontyRepl<T>,
+    pending_call_metadata: BTreeMap<u32, OsCallMetadata>,
 ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
     macro_rules! new_repl_snapshot {
         () => {
@@ -1044,6 +1057,7 @@ fn handle_repl_vm_result<T: ResourceTracker>(
                 repl,
                 executor,
                 vm_state: vm_state.expect("snapshot should exist"),
+                pending_call_metadata,
             }
         };
     }
@@ -1130,6 +1144,7 @@ fn handle_repl_vm_result<T: ResourceTracker>(
                 executor,
                 vm_state: vm_state.expect("snapshot should exist for ResolveFutures"),
                 pending_call_ids,
+                pending_call_metadata,
             }))
         }
         Ok(FrameExit::NameLookup {
