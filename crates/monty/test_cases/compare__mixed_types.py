@@ -75,6 +75,25 @@ assert not (nan > big), 'nan > LongInt should be False'
 assert not (big < nan), 'LongInt < nan should be False'
 assert not (big > nan), 'LongInt > nan should be False'
 
+huge = 10**400
+assert not (float('inf') < huge), 'inf < huge LongInt should be False'
+assert float('inf') > huge, 'inf > huge LongInt should be True'
+assert huge < float('inf'), 'huge LongInt < inf should be True'
+assert not (huge > float('inf')), 'huge LongInt > inf should be False'
+assert float('-inf') < huge, '-inf < huge LongInt should be True'
+assert not (float('-inf') > huge), '-inf > huge LongInt should be False'
+assert not (float('nan') < huge), 'nan < huge LongInt should be False'
+assert not (float('nan') > huge), 'nan > huge LongInt should be False'
+assert not (huge < float('nan')), 'huge LongInt < nan should be False'
+assert not (huge > float('nan')), 'huge LongInt > nan should be False'
+
+pow2_100 = 2**100
+pow2_100_float = 2.0**100
+assert pow2_100_float < (pow2_100 + 1), '2.0**100 must compare less than 2**100 + 1'
+assert pow2_100_float > (pow2_100 - 1), '2.0**100 must compare greater than 2**100 - 1'
+assert not (pow2_100_float <= (pow2_100 - 1)), '2.0**100 <= 2**100 - 1 should be False'
+assert not (pow2_100_float >= (pow2_100 + 1)), '2.0**100 >= 2**100 + 1 should be False'
+
 # === Bytes ordering ===
 assert b'abc' < b'abd', 'bytes lt'
 assert b'abc' <= b'abc', 'bytes le'

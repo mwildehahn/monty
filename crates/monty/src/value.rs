@@ -293,15 +293,7 @@ impl PyTrait for Value {
             // Float vs LongInt comparison
             (Self::Float(a), Self::Ref(id)) => {
                 if let HeapData::LongInt(li) = heap.get(*id) {
-                    // Convert bigint to f64 for comparison if possible. BigInt to f64 can lose precision
-                    // but python comparison handles this gracefully.
-                    if let Some(li_f64) = li.to_f64() {
-                        Ok(a.partial_cmp(&li_f64))
-                    } else if li.inner().sign() == num_bigint::Sign::Plus {
-                        Ok(Some(Ordering::Less)) // Float is finite, BigInt is larger than max f64
-                    } else {
-                        Ok(Some(Ordering::Greater)) // Float is finite, BigInt is smaller than min f64
-                    }
+                    Ok(compare_float_bigint(*a, li.inner()))
                 } else {
                     Ok(None)
                 }
@@ -309,13 +301,7 @@ impl PyTrait for Value {
             // LongInt vs Float comparison
             (Self::Ref(id), Self::Float(b)) => {
                 if let HeapData::LongInt(li) = heap.get(*id) {
-                    if let Some(li_f64) = li.to_f64() {
-                        Ok(li_f64.partial_cmp(b))
-                    } else if li.inner().sign() == num_bigint::Sign::Plus {
-                        Ok(Some(Ordering::Greater))
-                    } else {
-                        Ok(Some(Ordering::Less))
-                    }
+                    Ok(compare_float_bigint(*b, li.inner()).map(Ordering::reverse))
                 } else {
                     Ok(None)
                 }
@@ -2400,6 +2386,55 @@ fn longint_to_repeat_count(li: &LongInt) -> RunResult<usize> {
         Ok(count)
     } else {
         Err(ExcType::overflow_repeat_count().into())
+    }
+}
+
+/// Compares a float against a bigint using Python's exact numeric ordering semantics.
+///
+/// This avoids lossy `BigInt -> f64` conversion for values larger than 53 bits and
+/// preserves correct behavior for non-finite floats:
+/// - `NaN` returns `None` (unordered)
+/// - `+/-inf` are greater/less than all finite integers
+/// - finite values are compared exactly by decomposing the IEEE-754 float into
+///   `mantissa * 2^exponent` and comparing in integer space.
+fn compare_float_bigint(float: f64, int: &BigInt) -> Option<Ordering> {
+    if float.is_nan() {
+        return None;
+    }
+    if float.is_infinite() {
+        return Some(if float.is_sign_positive() {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        });
+    }
+
+    let bits = float.to_bits();
+    let is_negative = (bits >> 63) != 0;
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction_bits = bits & ((1_u64 << 52) - 1);
+
+    let (mantissa_u64, exponent) = if exponent_bits == 0 {
+        // Subnormal values and signed zero: value = fraction * 2^-1074.
+        (fraction_bits, -1074)
+    } else {
+        // Normal values: value = (2^52 + fraction) * 2^(exp - 1023 - 52).
+        ((1_u64 << 52) | fraction_bits, exponent_bits - 1023 - 52)
+    };
+
+    let mut mantissa = BigInt::from(mantissa_u64);
+    if is_negative {
+        mantissa = -mantissa;
+    }
+
+    let shift = usize::try_from(exponent.unsigned_abs()).expect("f64 exponent magnitude fits in usize");
+
+    if exponent >= 0 {
+        let lhs = mantissa << shift;
+        Some(lhs.cmp(int))
+    } else {
+        let rhs = int << shift;
+        Some(mantissa.cmp(&rhs))
     }
 }
 
