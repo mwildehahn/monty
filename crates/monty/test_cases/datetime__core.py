@@ -69,6 +69,15 @@ assert repr(named_dt.tzinfo) == "datetime.timezone(datetime.timedelta(seconds=36
     'datetime.tzinfo should preserve explicit timezone names'
 )
 
+# === tzinfo identity semantics ===
+identity_tz = datetime.timezone(datetime.timedelta(hours=1), 'IDENTITY')
+identity_dt = datetime.datetime(2024, 1, 1, 12, 0, 0, tzinfo=identity_tz)
+assert identity_dt.tzinfo is identity_tz, 'aware datetime should preserve input tzinfo identity'
+assert identity_dt.tzinfo is identity_dt.tzinfo, 'datetime.tzinfo should be stable across repeated attribute access'
+assert (identity_dt + datetime.timedelta(seconds=1)).tzinfo is identity_tz, (
+    'datetime arithmetic should preserve aware datetime tzinfo identity'
+)
+
 # === arithmetic ===
 assert datetime.date(2024, 1, 10) + datetime.timedelta(days=5) == datetime.date(2024, 1, 15), (
     'date + timedelta should add days'

@@ -34,6 +34,14 @@ pub(crate) struct DateTime {
     naive: NaiveDateTime,
     offset_seconds: Option<i32>,
     timezone_name: Option<String>,
+    /// Stable timezone object identity for aware datetimes.
+    ///
+    /// CPython preserves the original `tzinfo` object identity (`dt.tzinfo is tz`)
+    /// and repeated `dt.tzinfo` access returns the same object. We store a retained
+    /// heap reference so attribute lookup can return a stable object instead of
+    /// allocating a new timezone each time.
+    #[serde(default)]
+    tzinfo_ref: Option<HeapId>,
 }
 
 impl std::hash::Hash for DateTime {
@@ -61,6 +69,8 @@ pub(crate) fn from_components(
     second: i32,
     microsecond: i32,
     tzinfo: Option<TimeZone>,
+    tzinfo_ref: Option<HeapId>,
+    heap: &mut Heap<impl ResourceTracker>,
 ) -> RunResult<DateTime> {
     if !(0..=23).contains(&hour) {
         return Err(SimpleException::new_msg(ExcType::ValueError, "hour must be in 0..23").into());
@@ -96,10 +106,11 @@ pub(crate) fn from_components(
         return Err(SimpleException::new_msg(ExcType::ValueError, "timezone offset out of range").into());
     }
 
-    let datetime = DateTime {
+    let mut datetime = DateTime {
         naive: date_value.0.and_time(time),
         offset_seconds,
         timezone_name,
+        tzinfo_ref: None,
     };
 
     if let Some(offset_seconds) = offset_seconds {
@@ -111,6 +122,7 @@ pub(crate) fn from_components(
         }
     }
 
+    attach_or_allocate_tzinfo_ref(&mut datetime, tzinfo_ref, heap)?;
     Ok(datetime)
 }
 
@@ -191,6 +203,10 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
     defer_drop_mut!(pos, heap);
     let kwargs = kwargs.into_iter();
     defer_drop_mut!(kwargs, heap);
+    // Keep the provided tzinfo object alive across argument parsing so we can
+    // safely retain its identity in the constructed datetime.
+    let retained_tzinfo = Value::None;
+    defer_drop_mut!(retained_tzinfo, heap);
 
     let mut year: Option<i32> = None;
     let mut month: Option<i32> = None;
@@ -200,6 +216,7 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
     let mut second: i32 = 0;
     let mut microsecond: i32 = 0;
     let mut tzinfo: Option<TimeZone> = None;
+    let mut tzinfo_ref: Option<HeapId> = None;
     let mut seen_hour = false;
     let mut seen_minute = false;
     let mut seen_second = false;
@@ -229,7 +246,10 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
                 seen_microsecond = true;
             }
             7 => {
-                tzinfo = tzinfo_from_value(arg, heap)?;
+                let (value_tzinfo, value_tzinfo_ref) = tzinfo_from_value(arg, heap)?;
+                update_retained_tzinfo(retained_tzinfo, value_tzinfo_ref, heap);
+                tzinfo = value_tzinfo;
+                tzinfo_ref = value_tzinfo_ref;
                 seen_tzinfo = true;
             }
             _ => return Err(ExcType::type_error_at_most("datetime", 8, index + 1)),
@@ -294,7 +314,10 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
                 if seen_tzinfo {
                     return Err(ExcType::type_error_multiple_values("datetime", "tzinfo"));
                 }
-                tzinfo = tzinfo_from_value(value, heap)?;
+                let (value_tzinfo, value_tzinfo_ref) = tzinfo_from_value(value, heap)?;
+                update_retained_tzinfo(retained_tzinfo, value_tzinfo_ref, heap);
+                tzinfo = value_tzinfo;
+                tzinfo_ref = value_tzinfo_ref;
                 seen_tzinfo = true;
             }
             _ => return Err(ExcType::type_error_unexpected_keyword("datetime", key_name)),
@@ -317,7 +340,18 @@ pub(crate) fn init(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
         return Err(ExcType::type_error_missing_positional_with_names("datetime", &["day"]));
     };
 
-    let dt = from_components(year, month, day, hour, minute, second, microsecond, tzinfo)?;
+    let dt = from_components(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        microsecond,
+        tzinfo,
+        tzinfo_ref,
+        heap,
+    )?;
     Ok(Value::Ref(heap.allocate(HeapData::DateTime(dt))?))
 }
 
@@ -339,7 +373,8 @@ pub(crate) fn class_now(
         defer_drop!(arg, heap);
         match index {
             0 => {
-                tzinfo = tzinfo_from_value(arg, heap)?;
+                let (value_tzinfo, _) = tzinfo_from_value(arg, heap)?;
+                tzinfo = value_tzinfo;
                 seen_tz = true;
             }
             _ => return Err(ExcType::type_error_at_most("datetime.now", 1, index + 1)),
@@ -359,7 +394,8 @@ pub(crate) fn class_now(
         if seen_tz {
             return Err(ExcType::type_error_multiple_values("datetime.now", "tz"));
         }
-        tzinfo = tzinfo_from_value(value, heap)?;
+        let (value_tzinfo, _) = tzinfo_from_value(value, heap)?;
+        tzinfo = value_tzinfo;
         seen_tz = true;
     }
 
@@ -408,9 +444,10 @@ pub(crate) fn py_add(
         from_local_naive(next_local)
     };
 
-    let Some(next) = next else {
+    let Some(mut next) = next else {
         return Ok(None);
     };
+    attach_or_allocate_tzinfo_ref(&mut next, datetime.tzinfo_ref, heap)?;
     Ok(Some(Value::Ref(heap.allocate(HeapData::DateTime(next))?)))
 }
 
@@ -437,9 +474,10 @@ pub(crate) fn py_sub_timedelta(
         from_local_naive(next_local)
     };
 
-    let Some(next) = next else {
+    let Some(mut next) = next else {
         return Ok(None);
     };
+    attach_or_allocate_tzinfo_ref(&mut next, datetime.tzinfo_ref, heap)?;
     Ok(Some(Value::Ref(heap.allocate(HeapData::DateTime(next))?)))
 }
 
@@ -453,11 +491,14 @@ fn value_to_i32(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunResult<i
         .map_err(|_| SimpleException::new_msg(ExcType::OverflowError, "signed integer is greater than maximum").into())
 }
 
-fn tzinfo_from_value(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunResult<Option<TimeZone>> {
+fn tzinfo_from_value(
+    value: &Value,
+    heap: &Heap<impl ResourceTracker>,
+) -> RunResult<(Option<TimeZone>, Option<HeapId>)> {
     match value {
-        Value::None => Ok(None),
+        Value::None => Ok((None, None)),
         Value::Ref(id) => match heap.get(*id) {
-            HeapData::TimeZone(tz) => Ok(Some(tz.clone())),
+            HeapData::TimeZone(tz) => Ok((Some(tz.clone()), Some(*id))),
             _ => Err(ExcType::type_error(format!(
                 "tzinfo argument must be datetime.timezone or None, not {}",
                 value.py_type(heap)
@@ -468,6 +509,74 @@ fn tzinfo_from_value(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunRes
             value.py_type(heap)
         ))),
     }
+}
+
+/// Updates a temporary retained tzinfo value used during datetime construction.
+///
+/// This keeps the timezone object alive while constructor argument values are
+/// being dropped, so we can safely increment the same object again when
+/// attaching it to the resulting datetime.
+fn update_retained_tzinfo(
+    retained_tzinfo: &mut Value,
+    tzinfo_ref: Option<HeapId>,
+    heap: &mut Heap<impl ResourceTracker>,
+) {
+    let old = std::mem::replace(retained_tzinfo, Value::None);
+    old.drop_with_heap(heap);
+    *retained_tzinfo = if let Some(tzinfo_ref) = tzinfo_ref {
+        heap.inc_ref(tzinfo_ref);
+        Value::Ref(tzinfo_ref)
+    } else {
+        Value::None
+    };
+}
+
+/// Attaches a stable tzinfo identity to aware datetimes.
+///
+/// If `preferred_tzinfo_ref` is provided, it is retained and reused so identity
+/// semantics (`is`) match the input timezone object. Otherwise we allocate (or
+/// canonicalize to the UTC singleton) a timezone object once and reuse it.
+fn attach_or_allocate_tzinfo_ref(
+    datetime: &mut DateTime,
+    preferred_tzinfo_ref: Option<HeapId>,
+    heap: &mut Heap<impl ResourceTracker>,
+) -> Result<(), ResourceError> {
+    let Some(offset_seconds) = datetime.offset_seconds else {
+        datetime.tzinfo_ref = None;
+        return Ok(());
+    };
+
+    let tzinfo_ref = if let Some(tzinfo_ref) = preferred_tzinfo_ref {
+        heap.inc_ref(tzinfo_ref);
+        tzinfo_ref
+    } else {
+        allocate_tzinfo_ref(offset_seconds, datetime.timezone_name.clone(), heap)?
+    };
+    datetime.tzinfo_ref = Some(tzinfo_ref);
+    Ok(())
+}
+
+/// Allocates a timezone object for datetime storage, canonicalizing UTC to the
+/// shared singleton object.
+fn allocate_tzinfo_ref(
+    offset_seconds: i32,
+    timezone_name: Option<String>,
+    heap: &mut Heap<impl ResourceTracker>,
+) -> Result<HeapId, ResourceError> {
+    if offset_seconds == 0 && timezone_name.is_none() {
+        let utc = heap.get_timezone_utc()?;
+        defer_drop!(utc, heap);
+        let Value::Ref(id) = utc else {
+            unreachable!("timezone.utc must be heap-allocated");
+        };
+        heap.inc_ref(*id);
+        return Ok(*id);
+    }
+    let tz = TimeZone {
+        offset_seconds,
+        name: timezone_name,
+    };
+    heap.allocate(HeapData::TimeZone(tz))
 }
 
 /// Returns local wall-clock microseconds since Unix epoch for the datetime.
@@ -509,6 +618,7 @@ fn from_local_naive(naive: NaiveDateTime) -> Option<DateTime> {
         naive,
         offset_seconds: None,
         timezone_name: None,
+        tzinfo_ref: None,
     })
 }
 
@@ -535,6 +645,7 @@ fn from_utc_naive_with_timezone_parts(
         naive: local,
         offset_seconds: Some(offset_seconds),
         timezone_name,
+        tzinfo_ref: None,
     })
 }
 
@@ -598,7 +709,11 @@ impl PyTrait for DateTime {
         Ok(local_micros(self).partial_cmp(&local_micros(other)))
     }
 
-    fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {}
+    fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        if let Some(tzinfo_ref) = self.tzinfo_ref {
+            stack.push(tzinfo_ref);
+        }
+    }
 
     fn py_bool(&self, _heap: &Heap<impl ResourceTracker>, _interns: &Interns) -> bool {
         true
@@ -691,6 +806,10 @@ impl PyTrait for DateTime {
         interns: &Interns,
     ) -> RunResult<Option<AttrCallResult>> {
         if attr.as_str(interns) == "tzinfo" {
+            if let Some(tzinfo_ref) = self.tzinfo_ref {
+                heap.inc_ref(tzinfo_ref);
+                return Ok(Some(AttrCallResult::Value(Value::Ref(tzinfo_ref))));
+            }
             if let Some(tz) = timezone_info(self) {
                 if tz.offset_seconds == 0 && tz.name.is_none() {
                     return Ok(Some(AttrCallResult::Value(heap.get_timezone_utc()?)));

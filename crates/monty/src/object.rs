@@ -372,6 +372,8 @@ impl MontyObject {
                     i32::from(second),
                     i32::try_from(microsecond).map_err(|_| InvalidInputError::invalid_type("datetime"))?,
                     tzinfo,
+                    None,
+                    heap,
                 )
                 .map_err(|_| InvalidInputError::invalid_type("datetime"))?;
                 Ok(Value::Ref(heap.allocate(HeapData::DateTime(value))?))
