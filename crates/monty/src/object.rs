@@ -382,9 +382,14 @@ impl MontyObject {
                 Ok(Value::Ref(heap.allocate(HeapData::TimeDelta(delta))?))
             }
             Self::TimeZone(tz) => {
-                let tz = TimeZone::new(tz.offset_seconds, tz.name)
-                    .map_err(|_| InvalidInputError::invalid_type("timezone"))?;
-                Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))
+                if tz.offset_seconds == 0 && tz.name.is_none() {
+                    heap.get_timezone_utc()
+                        .map_err(|_| InvalidInputError::invalid_type("timezone"))
+                } else {
+                    let tz = TimeZone::new(tz.offset_seconds, tz.name)
+                        .map_err(|_| InvalidInputError::invalid_type("timezone"))?;
+                    Ok(Value::Ref(heap.allocate(HeapData::TimeZone(tz))?))
+                }
             }
             Self::Exception { exc_type, arg } => {
                 let exc = SimpleException::new(exc_type, arg);

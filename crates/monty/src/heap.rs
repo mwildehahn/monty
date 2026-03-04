@@ -1747,6 +1747,11 @@ impl<T: ResourceTracker> Heap<T> {
         let mut reachable: Vec<bool> = vec![false; self.entries.len()];
         let mut work_list: Vec<HeapId> = root;
 
+        // Ensure singletons are kept alive
+        if let Some(tz_utc) = self.timezone_utc {
+            work_list.push(tz_utc);
+        }
+
         while let Some(id) = work_list.pop() {
             let idx = id.index();
             // Skip if out of bounds or already visited
