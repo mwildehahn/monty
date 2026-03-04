@@ -23,6 +23,8 @@ now_named_plus_two = datetime.datetime.now(named_plus_two)
 assert repr(now_named_plus_two) == (
     "datetime.datetime(2023, 11, 15, 0, 13, 20, tzinfo=datetime.timezone(datetime.timedelta(seconds=7200), 'PLUS2'))"
 ), 'datetime.now() should preserve explicit timezone names on fixed-offset tzinfo'
+# TODO(datetime.now): preserve `tzinfo is input_tz` by threading the original tz
+# object through OS-call resume instead of reconstructing from offset/name only.
 
 # === repr/str parity ===
 assert repr(datetime.date(2024, 1, 15)) == 'datetime.date(2024, 1, 15)', 'date repr should match CPython'
@@ -40,6 +42,8 @@ assert datetime.timezone.utc is datetime.timezone.utc, 'timezone.utc should be a
 assert datetime.timezone(datetime.timedelta(0)) is datetime.timezone.utc, (
     'timezone(timedelta(0)) should return the timezone.utc singleton'
 )
+# TODO(timezone): add explicit regression for `timezone(timedelta(...), None)`
+# raising TypeError (explicit `None` name differs from omitted name).
 assert (
     repr(datetime.timezone(datetime.timedelta(seconds=3600))) == 'datetime.timezone(datetime.timedelta(seconds=3600))'
 ), 'timezone repr should match CPython'
@@ -148,6 +152,8 @@ except TypeError as e:
 assert datetime.timezone.utc == datetime.timezone(datetime.timedelta(0)), (
     'timezone.utc should equal zero offset timezone'
 )
+# TODO(timezone): add a GC-stability regression ensuring `timezone.utc` identity
+# persists after allocation/collection cycles.
 assert datetime.timezone(offset=datetime.timedelta(hours=1)) == datetime.timezone(datetime.timedelta(hours=1)), (
     'timezone constructor should support the offset keyword'
 )
