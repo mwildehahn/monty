@@ -22,6 +22,7 @@ use crate::{
     heap_data::HeapDataMut,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
     parse::CodeRange,
+    types::OsCallMetadata,
     value::Value,
 };
 
@@ -147,8 +148,11 @@ pub(crate) struct PendingCallData {
     pub args: ArgValues,
     /// Task that created this call (for ignoring results if task is cancelled).
     pub creator_task: TaskId,
-    /// Mode for converting datetime OS call results (only set for OsFunction::DateTimeNow).
-    pub os_call_mode: Option<crate::os::DateTimeNowResumeMode>,
+    /// Optional opaque metadata for async OS-call result conversion.
+    ///
+    /// Most pending calls do not need metadata. When present, this is interpreted
+    /// by host-facing progress layers, not by scheduler logic.
+    pub os_call_metadata: Option<OsCallMetadata>,
 }
 
 /// Scheduler for managing concurrent async tasks and external call tracking.
@@ -268,15 +272,15 @@ impl Scheduler {
         self.pending_calls.insert(call_id, data);
     }
 
-    /// Returns the datetime OS-call resume mode for a pending call, if present.
+    /// Returns optional async-call metadata for a pending call.
     ///
-    /// This is used when resolving async OS futures so callback payloads can be
-    /// converted into the same API-specific values as synchronous resume paths.
+    /// Used by host-facing resume layers to apply call-specific return-value
+    /// conversion during future resolution.
     #[inline]
-    pub fn get_pending_os_call_mode(&self, call_id: CallId) -> Option<crate::os::DateTimeNowResumeMode> {
+    pub fn get_pending_call_metadata(&self, call_id: CallId) -> Option<OsCallMetadata> {
         self.pending_calls
             .get(&call_id)
-            .and_then(|data| data.os_call_mode.clone())
+            .and_then(|data| data.os_call_metadata.clone())
     }
 
     /// Removes a call_id from the pending_calls map.

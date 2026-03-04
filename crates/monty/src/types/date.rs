@@ -16,7 +16,7 @@ use crate::{
     intern::Interns,
     os::OsFunction,
     resource::{ResourceError, ResourceTracker},
-    types::{AttrCallResult, PyTrait, TimeDelta, Type, timedelta},
+    types::{AttrCallResult, PyTrait, TimeDelta, Type, datetime_os_bridge::DATE_TODAY_INTERNAL_MODE, timedelta},
     value::Value,
 };
 
@@ -150,7 +150,7 @@ pub(crate) fn class_today(heap: &mut Heap<impl ResourceTracker>, args: ArgValues
     args.check_zero_args("date.today", heap)?;
     Ok(AttrCallResult::OsCall(
         OsFunction::DateTimeNow,
-        ArgValues::One(Value::Int(0)),
+        ArgValues::One(Value::Int(DATE_TODAY_INTERNAL_MODE)),
     ))
 }
 

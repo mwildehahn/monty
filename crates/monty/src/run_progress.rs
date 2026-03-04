@@ -16,11 +16,14 @@ use crate::{
     heap::Heap,
     io::PrintWriter,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
-    object::{MontyDate, MontyDateTime, MontyObject},
-    os::{DateTimeNowResumeMode, OsFunction},
+    object::MontyObject,
+    os::OsFunction,
     resource::ResourceTracker,
     run::Executor,
-    types::{TimeZone, datetime},
+    types::{
+        OsCallMetadata,
+        datetime_os_bridge::{convert_os_call_result, decode_datetime_now_internal_args},
+    },
     value::Value,
 };
 
@@ -214,174 +217,6 @@ impl<T: ResourceTracker> FunctionCall<T> {
 // OsCall
 // ---------------------------------------------------------------------------
 
-/// Decodes hidden internal args for `OsFunction::DateTimeNow`.
-///
-/// This is used when constructing an `OsCall` from VM state to preserve the
-/// internal resume behavior while keeping host-visible args empty.
-pub(crate) fn decode_datetime_now_internal_args(
-    args: &[MontyObject],
-    kwargs: &[(MontyObject, MontyObject)],
-) -> Result<DateTimeNowResumeMode, MontyException> {
-    if !kwargs.is_empty() {
-        return Err(MontyException::runtime_error(
-            "internal datetime.now metadata should not contain keyword arguments",
-        ));
-    }
-    let [mode_obj, rest @ ..] = args else {
-        return Err(MontyException::runtime_error(
-            "internal datetime.now metadata missing mode argument",
-        ));
-    };
-    let MontyObject::Int(mode) = mode_obj else {
-        return Err(MontyException::runtime_error(
-            "internal datetime.now mode argument must be an integer",
-        ));
-    };
-
-    match *mode {
-        0 => {
-            if rest.is_empty() {
-                Ok(DateTimeNowResumeMode::Today)
-            } else {
-                Err(MontyException::runtime_error(
-                    "internal datetime.now date.today mode should not include extra arguments",
-                ))
-            }
-        }
-        1 => {
-            if rest.is_empty() {
-                Ok(DateTimeNowResumeMode::Naive)
-            } else {
-                Err(MontyException::runtime_error(
-                    "internal datetime.now naive mode should not include extra arguments",
-                ))
-            }
-        }
-        2 => {
-            let (offset_obj, timezone_name_obj) = match rest {
-                [offset] => (offset, None),
-                [offset, name] => (offset, Some(name)),
-                _ => {
-                    return Err(MontyException::runtime_error(
-                        "internal datetime.now fixed-offset mode requires one or two arguments",
-                    ));
-                }
-            };
-            let MontyObject::Int(offset_raw) = offset_obj else {
-                return Err(MontyException::runtime_error(
-                    "internal datetime.now offset argument must be an integer",
-                ));
-            };
-            let offset_seconds = i32::try_from(*offset_raw)
-                .map_err(|_| MontyException::runtime_error("internal datetime.now offset argument must fit in i32"))?;
-            let timezone_name = match timezone_name_obj {
-                None => None,
-                Some(MontyObject::String(name)) => Some(name.clone()),
-                Some(_) => {
-                    return Err(MontyException::runtime_error(
-                        "internal datetime.now timezone name must be a string",
-                    ));
-                }
-            };
-            Ok(DateTimeNowResumeMode::FixedOffset {
-                offset_seconds,
-                timezone_name,
-            })
-        }
-        _ => Err(MontyException::runtime_error(format!(
-            "internal datetime.now mode {mode} is unsupported"
-        ))),
-    }
-}
-
-/// Converts a raw `datetime.now` callback payload into the API-specific value.
-///
-/// The host callback always returns `(timestamp_utc_seconds: float, local_offset_seconds: int)`.
-/// The hidden resume mode determines whether this becomes `date.today()`,
-/// naive `datetime.now()`, or fixed-offset aware `datetime.now(tz=...)`.
-pub(crate) fn convert_datetime_now_callback_result(
-    mode: &DateTimeNowResumeMode,
-    payload: MontyObject,
-) -> Result<MontyObject, MontyException> {
-    let MontyObject::Tuple(values) = payload else {
-        return Err(invalid_datetime_now_return_type(
-            "datetime.now callback must return a 2-tuple",
-        ));
-    };
-    let [timestamp_obj, local_offset_obj] = values.as_slice() else {
-        return Err(invalid_datetime_now_return_type(
-            "datetime.now callback must return exactly two values",
-        ));
-    };
-
-    let timestamp_utc = match timestamp_obj {
-        MontyObject::Float(value) => *value,
-        _ => {
-            return Err(invalid_datetime_now_return_type(
-                "datetime.now timestamp must be a float",
-            ));
-        }
-    };
-    if !timestamp_utc.is_finite() {
-        return Err(invalid_datetime_now_return_type(
-            "datetime.now timestamp must be finite",
-        ));
-    }
-
-    let local_offset_seconds = match local_offset_obj {
-        MontyObject::Int(value) => i32::try_from(*value).map_err(|_| {
-            invalid_datetime_now_return_type("datetime.now local offset must be an integer fitting i32")
-        })?,
-        _ => {
-            return Err(invalid_datetime_now_return_type(
-                "datetime.now local offset must be an integer fitting i32",
-            ));
-        }
-    };
-
-    let tzinfo = match mode {
-        DateTimeNowResumeMode::Today | DateTimeNowResumeMode::Naive => None,
-        DateTimeNowResumeMode::FixedOffset {
-            offset_seconds,
-            timezone_name,
-        } => Some(
-            TimeZone::new(*offset_seconds, timezone_name.clone())
-                .map_err(|_| MontyException::runtime_error("internal datetime.now fixed offset is out of range"))?,
-        ),
-    };
-
-    let datetime = datetime::from_now_payload(timestamp_utc, local_offset_seconds, tzinfo)
-        .map_err(|_| invalid_datetime_now_return_type("datetime.now payload produced out-of-range datetime"))?;
-    let Some((year, month, day, hour, minute, second, microsecond)) = datetime::to_components(&datetime) else {
-        return Err(invalid_datetime_now_return_type(
-            "datetime.now payload produced out-of-range datetime",
-        ));
-    };
-
-    match mode {
-        DateTimeNowResumeMode::Today => Ok(MontyObject::Date(MontyDate { year, month, day })),
-        DateTimeNowResumeMode::Naive | DateTimeNowResumeMode::FixedOffset { .. } => {
-            let tzinfo = datetime::timezone_info(&datetime);
-            Ok(MontyObject::DateTime(MontyDateTime {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                microsecond,
-                offset_seconds: datetime::offset_seconds(&datetime),
-                timezone_name: tzinfo.and_then(|tz| tz.name),
-            }))
-        }
-    }
-}
-
-/// Constructs the standardized host API error for invalid `datetime.now` payloads.
-fn invalid_datetime_now_return_type(msg: &'static str) -> MontyException {
-    MontyException::runtime_error(format!("invalid return type: {msg}"))
-}
-
 /// Execution paused for an OS-level operation.
 ///
 /// The host should execute the OS operation (filesystem, network, etc.) and
@@ -399,11 +234,11 @@ pub struct OsCall<T: ResourceTracker> {
     pub kwargs: Vec<(MontyObject, MontyObject)>,
     /// Unique identifier for this call (used for async correlation).
     pub call_id: u32,
-    /// Hidden mode metadata for `OsFunction::DateTimeNow`.
+    /// Optional hidden metadata for async OS-call resume conversion.
     ///
-    /// This keeps host-visible args stable (empty) while preserving enough
-    /// context to convert callback payloads into `date` or `datetime`.
-    datetime_now_mode: Option<DateTimeNowResumeMode>,
+    /// This is used by `datetime.now` to keep host-visible args stable (empty)
+    /// while preserving enough context to convert callback payloads.
+    pending_call_metadata: Option<OsCallMetadata>,
     /// Internal execution snapshot.
     snapshot: Snapshot<T>,
 }
@@ -415,7 +250,7 @@ impl<T: ResourceTracker> OsCall<T> {
         args: Vec<MontyObject>,
         kwargs: Vec<(MontyObject, MontyObject)>,
         call_id: u32,
-        datetime_now_mode: Option<DateTimeNowResumeMode>,
+        pending_call_metadata: Option<OsCallMetadata>,
         snapshot: Snapshot<T>,
     ) -> Self {
         Self {
@@ -423,7 +258,7 @@ impl<T: ResourceTracker> OsCall<T> {
             args,
             kwargs,
             call_id,
-            datetime_now_mode,
+            pending_call_metadata,
             snapshot,
         }
     }
@@ -439,14 +274,14 @@ impl<T: ResourceTracker> OsCall<T> {
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
         let Self {
-            datetime_now_mode,
+            pending_call_metadata,
             snapshot,
             ..
         } = self;
         let ext_result = result.into();
-        let ext_result = if let Some(mode) = datetime_now_mode.as_ref() {
+        let ext_result = if let Some(metadata) = pending_call_metadata.as_ref() {
             match ext_result {
-                ExtFunctionResult::Return(obj) => match convert_datetime_now_callback_result(mode, obj) {
+                ExtFunctionResult::Return(obj) => match convert_os_call_result(metadata, obj) {
                     Ok(obj) => ExtFunctionResult::Return(obj),
                     Err(error) => return snapshot.cleanup_and_error(error, print),
                 },
@@ -455,7 +290,7 @@ impl<T: ResourceTracker> OsCall<T> {
         } else {
             ext_result
         };
-        snapshot.run_with_pending_os_call_mode(ext_result, datetime_now_mode, print)
+        snapshot.run_with_pending_call_metadata(ext_result, pending_call_metadata, print)
     }
 }
 
@@ -670,8 +505,8 @@ impl<T: ResourceTracker> ResolveFutures<T> {
         for (call_id, ext_result) in results {
             match ext_result {
                 ExtFunctionResult::Return(obj) => {
-                    let obj = if let Some(mode) = vm.get_pending_os_call_mode(CallId::new(call_id)) {
-                        match convert_datetime_now_callback_result(&mode, obj) {
+                    let obj = if let Some(metadata) = vm.get_pending_call_metadata(CallId::new(call_id)) {
+                        match convert_os_call_result(&metadata, obj) {
                             Ok(obj) => obj,
                             Err(error) => {
                                 vm.cleanup();
@@ -772,18 +607,17 @@ impl<T: ResourceTracker> Snapshot<T> {
         result: impl Into<ExtFunctionResult>,
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
-        self.run_with_pending_os_call_mode(result, None, print)
+        self.run_with_pending_call_metadata(result, None, print)
     }
 
-    /// Continues execution while optionally attaching OS-call conversion metadata.
+    /// Continues execution while optionally attaching pending call metadata.
     ///
-    /// `pending_os_call_mode` is used when an OS call is resumed as a pending
-    /// external future. The mode is stored alongside the pending call ID so
-    /// `ResolveFutures` can convert resolved payloads correctly.
-    pub(crate) fn run_with_pending_os_call_mode(
+    /// Metadata is stored alongside the pending call ID so `ResolveFutures`
+    /// can apply call-specific conversion on resolved payloads.
+    pub(crate) fn run_with_pending_call_metadata(
         mut self,
         result: impl Into<ExtFunctionResult>,
-        pending_os_call_mode: Option<DateTimeNowResumeMode>,
+        pending_call_metadata: Option<OsCallMetadata>,
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
         let ext_result = result.into();
@@ -802,8 +636,8 @@ impl<T: ResourceTracker> Snapshot<T> {
             ExtFunctionResult::Error(exc) => vm.resume_with_exception(exc.into()),
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
-                if let Some(os_call_mode) = pending_os_call_mode {
-                    vm.add_pending_call_with_os_call_mode(call_id, Some(os_call_mode));
+                if let Some(metadata) = pending_call_metadata {
+                    vm.add_pending_call_with_metadata(call_id, Some(metadata));
                 } else {
                     vm.add_pending_call(call_id);
                 }
@@ -968,15 +802,21 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
             call_id,
         }) => {
             let (args_py, kwargs_py) = args.into_py_objects(&mut heap, &executor.interns);
-            let datetime_now_mode = if function == OsFunction::DateTimeNow {
-                Some(decode_datetime_now_internal_args(&args_py, &kwargs_py)?)
+            let (public_args, public_kwargs, pending_call_metadata) = if function == OsFunction::DateTimeNow {
+                // Validate hidden metadata now so malformed internal payloads
+                // fail at suspension time, not later at resume.
+                decode_datetime_now_internal_args(&args_py, &kwargs_py)?;
+                (
+                    vec![],
+                    vec![],
+                    Some(OsCallMetadata {
+                        function,
+                        args: args_py,
+                        kwargs: kwargs_py,
+                    }),
+                )
             } else {
-                None
-            };
-            let (public_args, public_kwargs) = if datetime_now_mode.is_some() {
-                (vec![], vec![])
-            } else {
-                (args_py, kwargs_py)
+                (args_py, kwargs_py, None)
             };
 
             Ok(RunProgress::OsCall(OsCall::new(
@@ -984,7 +824,7 @@ pub(crate) fn handle_vm_result<T: ResourceTracker>(
                 public_args,
                 public_kwargs,
                 call_id.raw(),
-                datetime_now_mode,
+                pending_call_metadata,
                 new_snapshot!(),
             )))
         }

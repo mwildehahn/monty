@@ -20,7 +20,12 @@ use crate::{
     intern::Interns,
     os::OsFunction,
     resource::{ResourceError, ResourceTracker},
-    types::{AttrCallResult, PyTrait, Str, TimeDelta, TimeZone, Type, date, str::StringRepr, timedelta, timezone},
+    types::{
+        AttrCallResult, PyTrait, Str, TimeDelta, TimeZone, Type, date,
+        datetime_os_bridge::{DATETIME_NOW_FIXED_OFFSET_INTERNAL_MODE, DATETIME_NOW_NAIVE_INTERNAL_MODE},
+        str::StringRepr,
+        timedelta, timezone,
+    },
     value::Value,
 };
 
@@ -403,7 +408,7 @@ pub(crate) fn class_now(
     // 1 => datetime.now(tz=None), 2 => datetime.now(tz=<fixed offset>[, explicit name])
     let os_args = match tzinfo {
         Some(tz) => {
-            let mode = Value::Int(2);
+            let mode = Value::Int(DATETIME_NOW_FIXED_OFFSET_INTERNAL_MODE);
             let offset = Value::Int(i64::from(tz.offset_seconds));
             if let Some(name) = tz.name {
                 let name = Value::Ref(heap.allocate(HeapData::Str(Str::new(name)))?);
@@ -415,7 +420,7 @@ pub(crate) fn class_now(
                 ArgValues::Two(mode, offset)
             }
         }
-        None => ArgValues::One(Value::Int(1)),
+        None => ArgValues::One(Value::Int(DATETIME_NOW_NAIVE_INTERNAL_MODE)),
     };
     Ok(AttrCallResult::OsCall(OsFunction::DateTimeNow, os_args))
 }

@@ -20,12 +20,14 @@ use crate::{
     io::PrintWriter,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
     object::MontyObject,
-    os::{DateTimeNowResumeMode, OsFunction},
+    os::OsFunction,
     parse::{parse, parse_with_interner},
     prepare::{prepare, prepare_with_existing_names},
     resource::ResourceTracker,
-    run_progress::{
-        ExtFunctionResult, NameLookupResult, convert_datetime_now_callback_result, decode_datetime_now_internal_args,
+    run_progress::{ExtFunctionResult, NameLookupResult},
+    types::{
+        OsCallMetadata,
+        datetime_os_bridge::{convert_os_call_result, decode_datetime_now_internal_args},
     },
     value::Value,
 };
@@ -650,10 +652,11 @@ pub struct ReplOsCall<T: ResourceTracker> {
     pub kwargs: Vec<(MontyObject, MontyObject)>,
     /// Unique identifier for this call (used for async correlation).
     pub call_id: u32,
-    /// Hidden mode metadata for `OsFunction::DateTimeNow`.
+    /// Optional hidden metadata for async OS-call resume conversion.
     ///
-    /// Keeps host-visible args empty while preserving resume conversion context.
-    datetime_now_mode: Option<DateTimeNowResumeMode>,
+    /// This is used by `datetime.now` to keep host-visible args stable (empty)
+    /// while preserving resume conversion context.
+    pending_call_metadata: Option<OsCallMetadata>,
     /// Internal REPL execution snapshot.
     snapshot: ReplSnapshot<T>,
 }
@@ -666,14 +669,14 @@ impl<T: ResourceTracker> ReplOsCall<T> {
         print: &mut PrintWriter<'_>,
     ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
         let Self {
-            datetime_now_mode,
+            pending_call_metadata,
             snapshot,
             ..
         } = self;
         let ext_result = result.into();
-        let ext_result = if let Some(mode) = datetime_now_mode.as_ref() {
+        let ext_result = if let Some(metadata) = pending_call_metadata.as_ref() {
             match ext_result {
-                ExtFunctionResult::Return(obj) => match convert_datetime_now_callback_result(mode, obj) {
+                ExtFunctionResult::Return(obj) => match convert_os_call_result(metadata, obj) {
                     Ok(obj) => ExtFunctionResult::Return(obj),
                     Err(error) => return Err(snapshot.cleanup_and_error(error, print)),
                 },
@@ -682,7 +685,7 @@ impl<T: ResourceTracker> ReplOsCall<T> {
         } else {
             ext_result
         };
-        snapshot.run_with_pending_os_call_mode(ext_result, datetime_now_mode, print)
+        snapshot.run_with_pending_call_metadata(ext_result, pending_call_metadata, print)
     }
 }
 
@@ -855,8 +858,8 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
         for (call_id, ext_result) in results {
             match ext_result {
                 ExtFunctionResult::Return(obj) => {
-                    let obj = if let Some(mode) = vm.get_pending_os_call_mode(CallId::new(call_id)) {
-                        match convert_datetime_now_callback_result(&mode, obj) {
+                    let obj = if let Some(metadata) = vm.get_pending_call_metadata(CallId::new(call_id)) {
+                        match convert_os_call_result(&metadata, obj) {
                             Ok(obj) => obj,
                             Err(error) => {
                                 vm.cleanup();
@@ -945,18 +948,17 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
         result: impl Into<ExtFunctionResult>,
         print: &mut PrintWriter<'_>,
     ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
-        self.run_with_pending_os_call_mode(result, None, print)
+        self.run_with_pending_call_metadata(result, None, print)
     }
 
-    /// Continues snippet execution while optionally attaching OS-call metadata.
+    /// Continues snippet execution while optionally attaching pending call metadata.
     ///
-    /// `pending_os_call_mode` is only used when this resume introduces a pending
-    /// future for an OS callback (`datetime.now`), so async resolution can
-    /// reconstruct the correct `date`/`datetime` value shape.
-    fn run_with_pending_os_call_mode(
+    /// Metadata is stored alongside pending call IDs so async resolution can
+    /// apply call-specific conversion on resolved payloads.
+    fn run_with_pending_call_metadata(
         self,
         result: impl Into<ExtFunctionResult>,
-        pending_os_call_mode: Option<DateTimeNowResumeMode>,
+        pending_call_metadata: Option<OsCallMetadata>,
         print: &mut PrintWriter<'_>,
     ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
         let Self {
@@ -981,8 +983,8 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
             ExtFunctionResult::Error(exc) => vm.resume_with_exception(exc.into()),
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
-                if let Some(os_call_mode) = pending_os_call_mode {
-                    vm.add_pending_call_with_os_call_mode(call_id, Some(os_call_mode));
+                if let Some(metadata) = pending_call_metadata {
+                    vm.add_pending_call_with_metadata(call_id, Some(metadata));
                 } else {
                     vm.add_pending_call(call_id);
                 }
@@ -1078,18 +1080,21 @@ fn handle_repl_vm_result<T: ResourceTracker>(
             call_id,
         }) => {
             let (args_py, kwargs_py) = args.into_py_objects(&mut repl.heap, &executor.interns);
-            let datetime_now_mode = if function == OsFunction::DateTimeNow {
-                match decode_datetime_now_internal_args(&args_py, &kwargs_py) {
-                    Ok(mode) => Some(mode),
-                    Err(error) => return Err(Box::new(ReplStartError { repl, error })),
+            let (public_args, public_kwargs, pending_call_metadata) = if function == OsFunction::DateTimeNow {
+                if let Err(error) = decode_datetime_now_internal_args(&args_py, &kwargs_py) {
+                    return Err(Box::new(ReplStartError { repl, error }));
                 }
+                (
+                    vec![],
+                    vec![],
+                    Some(OsCallMetadata {
+                        function,
+                        args: args_py,
+                        kwargs: kwargs_py,
+                    }),
+                )
             } else {
-                None
-            };
-            let (public_args, public_kwargs) = if datetime_now_mode.is_some() {
-                (vec![], vec![])
-            } else {
-                (args_py, kwargs_py)
+                (args_py, kwargs_py, None)
             };
 
             Ok(ReplProgress::OsCall(ReplOsCall {
@@ -1097,7 +1102,7 @@ fn handle_repl_vm_result<T: ResourceTracker>(
                 args: public_args,
                 kwargs: public_kwargs,
                 call_id: call_id.raw(),
-                datetime_now_mode,
+                pending_call_metadata,
                 snapshot: new_repl_snapshot!(),
             }))
         }
