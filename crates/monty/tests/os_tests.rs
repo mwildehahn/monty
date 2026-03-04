@@ -5,8 +5,8 @@
 //! and that return values are correctly used by Python code.
 
 use monty::{
-    ExcType, MontyDate, MontyDateTime, MontyObject, MontyRun, NoLimitTracker, OsFunction, PrintWriter, RunProgress,
-    file_stat,
+    ExcType, ExtFunctionResult, MontyDate, MontyDateTime, MontyObject, MontyRun, NoLimitTracker, OsFunction,
+    PrintWriter, RunProgress, file_stat,
 };
 
 /// Helper to run code and extract the OsCall progress.
@@ -420,6 +420,47 @@ datetime.date.today()
             month: 11,
             day: 14,
         })
+    );
+}
+
+#[test]
+fn datetime_now_async_resume_payload_converts_to_datetime() {
+    let code = r"
+import datetime
+dt = await datetime.datetime.now()
+str(dt)
+";
+    let runner = MontyRun::new(code.to_owned(), "test.py", vec![]).unwrap();
+    let progress = runner.start(vec![], NoLimitTracker, &mut PrintWriter::Stdout).unwrap();
+    let RunProgress::OsCall(call) = progress else {
+        panic!("expected OsCall");
+    };
+    assert_eq!(call.function, OsFunction::DateTimeNow);
+    let call_id = call.call_id;
+
+    let progress = call
+        .resume(ExtFunctionResult::Future(call_id), &mut PrintWriter::Stdout)
+        .unwrap();
+    let RunProgress::ResolveFutures(waiting) = progress else {
+        panic!("expected ResolveFutures");
+    };
+    assert_eq!(waiting.pending_call_ids(), &[call_id]);
+
+    let resumed = waiting
+        .resume(
+            vec![(
+                call_id,
+                ExtFunctionResult::Return(MontyObject::Tuple(vec![
+                    MontyObject::Float(1_700_000_000.0),
+                    MontyObject::Int(0),
+                ])),
+            )],
+            &mut PrintWriter::Stdout,
+        )
+        .unwrap();
+    assert_eq!(
+        resumed.into_complete().expect("expected completion"),
+        MontyObject::String("2023-11-14 22:13:20".to_owned())
     );
 }
 

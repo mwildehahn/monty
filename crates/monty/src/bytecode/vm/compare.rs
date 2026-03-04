@@ -4,6 +4,7 @@ use super::{VM, datetime_awareness};
 use crate::{
     defer_drop,
     exception_private::{ExcType, RunError},
+    heap::HeapData,
     resource::ResourceTracker,
     types::{LongInt, PyTrait},
     value::Value,
@@ -60,10 +61,15 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             {
                 return Err(ExcType::datetime_compare_naive_aware_error());
             }
-            if matches!(
-                (lhs, rhs),
-                (Value::Float(_) | Value::Int(_), Value::Float(_)) | (Value::Float(_), Value::Int(_))
-            ) {
+            let float_nan_ordering = match (lhs, rhs) {
+                (Value::Float(_), Value::Float(_) | Value::Int(_) | Value::Bool(_) | Value::InternLongInt(_))
+                | (Value::Int(_) | Value::Bool(_) | Value::InternLongInt(_), Value::Float(_)) => true,
+                (Value::Float(_), Value::Ref(id)) | (Value::Ref(id), Value::Float(_)) => {
+                    matches!(this.heap.get(*id), HeapData::LongInt(_))
+                }
+                _ => false,
+            };
+            if float_nan_ordering {
                 // If float comparisons return None, it's due to NaN, where ordered comparisons yield False.
                 false
             } else {

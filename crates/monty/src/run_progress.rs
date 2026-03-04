@@ -17,7 +17,7 @@ use crate::{
     io::PrintWriter,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
     object::{MontyDate, MontyDateTime, MontyObject},
-    os::OsFunction,
+    os::{DateTimeNowResumeMode, OsFunction},
     resource::ResourceTracker,
     run::Executor,
     types::{TimeZone, datetime},
@@ -213,28 +213,6 @@ impl<T: ResourceTracker> FunctionCall<T> {
 // ---------------------------------------------------------------------------
 // OsCall
 // ---------------------------------------------------------------------------
-
-/// Internal resume mode encoded in hidden `datetime.now` callback metadata.
-///
-/// `datetime.date.today()` and `datetime.datetime.now()` both use the same
-/// host callback (`OsFunction::DateTimeNow`). The VM encodes which Python API
-/// initiated the callback in hidden args so host-facing APIs can expose a
-/// stable zero-argument call shape while still reconstructing the correct value
-/// type during resume.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum DateTimeNowResumeMode {
-    /// Resume as `datetime.date.today()`.
-    Today,
-    /// Resume as naive `datetime.datetime.now()`.
-    Naive,
-    /// Resume as fixed-offset `datetime.datetime.now(tz=...)`.
-    FixedOffset {
-        /// Fixed UTC offset in seconds for the target timezone.
-        offset_seconds: i32,
-        /// Optional explicit timezone name.
-        timezone_name: Option<String>,
-    },
-}
 
 /// Decodes hidden internal args for `OsFunction::DateTimeNow`.
 ///
@@ -477,7 +455,7 @@ impl<T: ResourceTracker> OsCall<T> {
         } else {
             ext_result
         };
-        snapshot.run(ext_result, print)
+        snapshot.run_with_pending_os_call_mode(ext_result, datetime_now_mode, print)
     }
 }
 
@@ -691,9 +669,29 @@ impl<T: ResourceTracker> ResolveFutures<T> {
 
         for (call_id, ext_result) in results {
             match ext_result {
-                ExtFunctionResult::Return(obj) => vm.resolve_future(call_id, obj).map_err(|e| {
-                    MontyException::runtime_error(format!("Invalid return type for call {call_id}: {e}"))
-                })?,
+                ExtFunctionResult::Return(obj) => {
+                    let obj = if let Some(mode) = vm.get_pending_os_call_mode(CallId::new(call_id)) {
+                        match convert_datetime_now_callback_result(&mode, obj) {
+                            Ok(obj) => obj,
+                            Err(error) => {
+                                vm.cleanup();
+                                #[cfg(feature = "ref-count-panic")]
+                                namespaces.drop_global_with_heap(&mut heap);
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        obj
+                    };
+                    if let Err(e) = vm.resolve_future(call_id, obj) {
+                        vm.cleanup();
+                        #[cfg(feature = "ref-count-panic")]
+                        namespaces.drop_global_with_heap(&mut heap);
+                        return Err(MontyException::runtime_error(format!(
+                            "Invalid return type for call {call_id}: {e}"
+                        )));
+                    }
+                }
                 ExtFunctionResult::Error(exc) => vm.fail_future(call_id, exc.into()),
                 ExtFunctionResult::Future(_) => {}
                 ExtFunctionResult::NotFound(function_name) => {
@@ -770,8 +768,22 @@ pub(crate) struct Snapshot<T: ResourceTracker> {
 impl<T: ResourceTracker> Snapshot<T> {
     /// Continues execution with the return value or exception from the external call.
     pub(crate) fn run(
+        self,
+        result: impl Into<ExtFunctionResult>,
+        print: &mut PrintWriter<'_>,
+    ) -> Result<RunProgress<T>, MontyException> {
+        self.run_with_pending_os_call_mode(result, None, print)
+    }
+
+    /// Continues execution while optionally attaching OS-call conversion metadata.
+    ///
+    /// `pending_os_call_mode` is used when an OS call is resumed as a pending
+    /// external future. The mode is stored alongside the pending call ID so
+    /// `ResolveFutures` can convert resolved payloads correctly.
+    pub(crate) fn run_with_pending_os_call_mode(
         mut self,
         result: impl Into<ExtFunctionResult>,
+        pending_os_call_mode: Option<DateTimeNowResumeMode>,
         print: &mut PrintWriter<'_>,
     ) -> Result<RunProgress<T>, MontyException> {
         let ext_result = result.into();
@@ -790,7 +802,11 @@ impl<T: ResourceTracker> Snapshot<T> {
             ExtFunctionResult::Error(exc) => vm.resume_with_exception(exc.into()),
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
-                vm.add_pending_call(call_id);
+                if let Some(os_call_mode) = pending_os_call_mode {
+                    vm.add_pending_call_with_os_call_mode(call_id, Some(os_call_mode));
+                } else {
+                    vm.add_pending_call(call_id);
+                }
                 vm.push(Value::ExternalFuture(call_id));
                 vm.run()
             }

@@ -290,6 +290,36 @@ impl PyTrait for Value {
                     Ok(None)
                 }
             }
+            // Float vs LongInt comparison
+            (Self::Float(a), Self::Ref(id)) => {
+                if let HeapData::LongInt(li) = heap.get(*id) {
+                    // Convert bigint to f64 for comparison if possible. BigInt to f64 can lose precision
+                    // but python comparison handles this gracefully.
+                    if let Some(li_f64) = li.to_f64() {
+                        Ok(a.partial_cmp(&li_f64))
+                    } else if li.inner().sign() == num_bigint::Sign::Plus {
+                        Ok(Some(Ordering::Less)) // Float is finite, BigInt is larger than max f64
+                    } else {
+                        Ok(Some(Ordering::Greater)) // Float is finite, BigInt is smaller than min f64
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+            // LongInt vs Float comparison
+            (Self::Ref(id), Self::Float(b)) => {
+                if let HeapData::LongInt(li) = heap.get(*id) {
+                    if let Some(li_f64) = li.to_f64() {
+                        Ok(li_f64.partial_cmp(b))
+                    } else if li.inner().sign() == num_bigint::Sign::Plus {
+                        Ok(Some(Ordering::Greater))
+                    } else {
+                        Ok(Some(Ordering::Less))
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
             // Ref vs Ref comparison: handles LongInt and Str
             (Self::Ref(id1), Self::Ref(id2)) => match (heap.get(*id1), heap.get(*id2)) {
                 (HeapData::LongInt(a), HeapData::LongInt(b)) => Ok(a.inner().partial_cmp(b.inner())),

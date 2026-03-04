@@ -23,7 +23,7 @@ use crate::{
         list::List,
         set::{FrozenSet, Set},
         str::{Str, StringRepr, string_repr_fmt},
-        timedelta as timedelta_type,
+        timedelta as timedelta_type, timezone as timezone_type,
     },
     value::{EitherStr, Value},
 };
@@ -806,7 +806,8 @@ impl MontyObject {
                     if offset == 0 && datetime.timezone_name.is_none() {
                         f.write_str(", tzinfo=datetime.timezone.utc")?;
                     } else {
-                        write!(f, ", tzinfo=datetime.timezone(datetime.timedelta(seconds={offset})")?;
+                        let timedelta_repr = timezone_type::format_offset_timedelta_repr(offset);
+                        write!(f, ", tzinfo=datetime.timezone({timedelta_repr}")?;
                         if let Some(name) = &datetime.timezone_name {
                             write!(f, ", {}", StringRepr(name))?;
                         }
@@ -844,7 +845,8 @@ impl MontyObject {
                 if tz.offset_seconds == 0 && tz.name.is_none() {
                     return f.write_str("datetime.timezone.utc");
                 }
-                write!(f, "datetime.timezone(datetime.timedelta(seconds={})", tz.offset_seconds)?;
+                let timedelta_repr = timezone_type::format_offset_timedelta_repr(tz.offset_seconds);
+                write!(f, "datetime.timezone({timedelta_repr}")?;
                 if let Some(name) = &tz.name {
                     write!(f, ", {}", StringRepr(name))?;
                 }

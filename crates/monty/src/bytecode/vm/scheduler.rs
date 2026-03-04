@@ -147,6 +147,8 @@ pub(crate) struct PendingCallData {
     pub args: ArgValues,
     /// Task that created this call (for ignoring results if task is cancelled).
     pub creator_task: TaskId,
+    /// Mode for converting datetime OS call results (only set for OsFunction::DateTimeNow).
+    pub os_call_mode: Option<crate::os::DateTimeNowResumeMode>,
 }
 
 /// Scheduler for managing concurrent async tasks and external call tracking.
@@ -264,6 +266,17 @@ impl Scheduler {
     /// Called when the host uses async resolution (`run_pending()`).
     pub fn add_pending_call(&mut self, call_id: CallId, data: PendingCallData) {
         self.pending_calls.insert(call_id, data);
+    }
+
+    /// Returns the datetime OS-call resume mode for a pending call, if present.
+    ///
+    /// This is used when resolving async OS futures so callback payloads can be
+    /// converted into the same API-specific values as synchronous resume paths.
+    #[inline]
+    pub fn get_pending_os_call_mode(&self, call_id: CallId) -> Option<crate::os::DateTimeNowResumeMode> {
+        self.pending_calls
+            .get(&call_id)
+            .and_then(|data| data.os_call_mode.clone())
     }
 
     /// Removes a call_id from the pending_calls map.

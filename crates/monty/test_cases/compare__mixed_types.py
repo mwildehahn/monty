@@ -66,6 +66,15 @@ assert small_big < large_big, 'LongInt < LongInt'
 assert large_big > small_big, 'LongInt > LongInt'
 assert big != 'hello', 'LongInt != str'
 
+# === Float/LongInt ordering and NaN handling ===
+assert 1.5 < big, 'float < LongInt should compare numerically'
+assert big > 1.5, 'LongInt > float should compare numerically'
+nan = float('nan')
+assert not (nan < big), 'nan < LongInt should be False'
+assert not (nan > big), 'nan > LongInt should be False'
+assert not (big < nan), 'LongInt < nan should be False'
+assert not (big > nan), 'LongInt > nan should be False'
+
 # === Bytes ordering ===
 assert b'abc' < b'abd', 'bytes lt'
 assert b'abc' <= b'abc', 'bytes le'

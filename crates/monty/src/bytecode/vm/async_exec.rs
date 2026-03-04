@@ -17,6 +17,7 @@ use crate::{
     heap::{HeapData, HeapGuard, HeapId},
     heap_data::HeapDataMut,
     intern::FunctionId,
+    os::DateTimeNowResumeMode,
     resource::ResourceTracker,
     types::{List, PyTrait},
     value::Value,
@@ -938,6 +939,14 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
     /// Note: The args are empty because the host already has them from the
     /// `FunctionCall` return value. We only need to track the creator task.
     pub fn add_pending_call(&mut self, call_id: CallId) {
+        self.add_pending_call_with_os_call_mode(call_id, None);
+    }
+
+    /// Adds pending call data with optional OS-call conversion metadata.
+    ///
+    /// `os_call_mode` is only set for pending `datetime.now` OS calls so async
+    /// resolution can reconstruct `date`/`datetime` return types on future resume.
+    pub fn add_pending_call_with_os_call_mode(&mut self, call_id: CallId, os_call_mode: Option<DateTimeNowResumeMode>) {
         let scheduler = self.get_or_create_scheduler();
         let current_task = scheduler.current_task_id().unwrap_or_default();
         scheduler.add_pending_call(
@@ -945,8 +954,16 @@ impl<T: ResourceTracker> VM<'_, '_, T> {
             PendingCallData {
                 args: ArgValues::Empty,
                 creator_task: current_task,
+                os_call_mode,
             },
         );
+    }
+
+    /// Retrieves the OS call resume mode for a pending call, if any.
+    pub fn get_pending_os_call_mode(&self, call_id: CallId) -> Option<DateTimeNowResumeMode> {
+        self.scheduler
+            .as_ref()
+            .and_then(|s| s.get_pending_os_call_mode(call_id))
     }
 
     /// Prepares the current task to continue after futures are resolved.

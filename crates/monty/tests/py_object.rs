@@ -291,6 +291,29 @@ fn py_repr_datetime_scalars() {
         .py_repr(),
         "datetime.timezone(datetime.timedelta(seconds=61), 'N')"
     );
+    assert_eq!(
+        MontyObject::TimeZone(MontyTimeZone {
+            offset_seconds: -1,
+            name: None,
+        })
+        .py_repr(),
+        "datetime.timezone(datetime.timedelta(days=-1, seconds=86399))"
+    );
+    assert_eq!(
+        MontyObject::DateTime(MontyDateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 10,
+            minute: 30,
+            second: 0,
+            microsecond: 0,
+            offset_seconds: Some(-1),
+            timezone_name: None,
+        })
+        .py_repr(),
+        "datetime.datetime(2024, 1, 15, 10, 30, tzinfo=datetime.timezone(datetime.timedelta(days=-1, seconds=86399)))"
+    );
 }
 
 #[test]

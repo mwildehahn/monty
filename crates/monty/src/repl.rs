@@ -20,13 +20,12 @@ use crate::{
     io::PrintWriter,
     namespace::{GLOBAL_NS_IDX, NamespaceId, Namespaces},
     object::MontyObject,
-    os::OsFunction,
+    os::{DateTimeNowResumeMode, OsFunction},
     parse::{parse, parse_with_interner},
     prepare::{prepare, prepare_with_existing_names},
     resource::ResourceTracker,
     run_progress::{
-        DateTimeNowResumeMode, ExtFunctionResult, NameLookupResult, convert_datetime_now_callback_result,
-        decode_datetime_now_internal_args,
+        ExtFunctionResult, NameLookupResult, convert_datetime_now_callback_result, decode_datetime_now_internal_args,
     },
     value::Value,
 };
@@ -683,7 +682,7 @@ impl<T: ResourceTracker> ReplOsCall<T> {
         } else {
             ext_result
         };
-        snapshot.run(ext_result, print)
+        snapshot.run_with_pending_os_call_mode(ext_result, datetime_now_mode, print)
     }
 }
 
@@ -856,6 +855,17 @@ impl<T: ResourceTracker> ReplResolveFutures<T> {
         for (call_id, ext_result) in results {
             match ext_result {
                 ExtFunctionResult::Return(obj) => {
+                    let obj = if let Some(mode) = vm.get_pending_os_call_mode(CallId::new(call_id)) {
+                        match convert_datetime_now_callback_result(&mode, obj) {
+                            Ok(obj) => obj,
+                            Err(error) => {
+                                vm.cleanup();
+                                return Err(Box::new(ReplStartError { repl, error }));
+                            }
+                        }
+                    } else {
+                        obj
+                    };
                     if let Err(e) = vm.resolve_future(call_id, obj) {
                         vm.cleanup();
                         let error =
@@ -935,6 +945,20 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
         result: impl Into<ExtFunctionResult>,
         print: &mut PrintWriter<'_>,
     ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
+        self.run_with_pending_os_call_mode(result, None, print)
+    }
+
+    /// Continues snippet execution while optionally attaching OS-call metadata.
+    ///
+    /// `pending_os_call_mode` is only used when this resume introduces a pending
+    /// future for an OS callback (`datetime.now`), so async resolution can
+    /// reconstruct the correct `date`/`datetime` value shape.
+    fn run_with_pending_os_call_mode(
+        self,
+        result: impl Into<ExtFunctionResult>,
+        pending_os_call_mode: Option<DateTimeNowResumeMode>,
+        print: &mut PrintWriter<'_>,
+    ) -> Result<ReplProgress<T>, Box<ReplStartError<T>>> {
         let Self {
             mut repl,
             executor,
@@ -957,7 +981,11 @@ impl<T: ResourceTracker> ReplSnapshot<T> {
             ExtFunctionResult::Error(exc) => vm.resume_with_exception(exc.into()),
             ExtFunctionResult::Future(raw_call_id) => {
                 let call_id = CallId::new(raw_call_id);
-                vm.add_pending_call(call_id);
+                if let Some(os_call_mode) = pending_os_call_mode {
+                    vm.add_pending_call_with_os_call_mode(call_id, Some(os_call_mode));
+                } else {
+                    vm.add_pending_call(call_id);
+                }
                 vm.push(Value::ExternalFuture(call_id));
                 vm.run()
             }

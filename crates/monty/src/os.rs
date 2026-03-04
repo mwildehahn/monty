@@ -86,6 +86,28 @@ pub enum OsFunction {
     DateTimeNow,
 }
 
+/// Internal resume mode encoded in hidden `datetime.now` callback metadata.
+///
+/// `datetime.date.today()` and `datetime.datetime.now()` both use the same
+/// host callback (`OsFunction::DateTimeNow`). The VM encodes which Python API
+/// initiated the callback in hidden args so host-facing APIs can expose a
+/// stable zero-argument call shape while still reconstructing the correct value
+/// type during resume.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum DateTimeNowResumeMode {
+    /// Resume as `datetime.date.today()`.
+    Today,
+    /// Resume as naive `datetime.datetime.now()`.
+    Naive,
+    /// Resume as fixed-offset `datetime.datetime.now(tz=...)`.
+    FixedOffset {
+        /// Fixed UTC offset in seconds for the target timezone.
+        offset_seconds: i32,
+        /// Optional explicit timezone name.
+        timezone_name: Option<String>,
+    },
+}
+
 impl TryFrom<StaticStrings> for OsFunction {
     type Error = ();
 
